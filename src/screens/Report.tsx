@@ -94,7 +94,7 @@ export function Report() {
                 </div>
                 <span className="markwrap">
                   <p className="rrow__text">{r.text}</p>
-                  <SnagMark verdict={v} />
+                  <SnagMark verdict={v} delay={i * 60} />
                 </span>
                 {r.testable ? (
                   <div className="rrow__checker">

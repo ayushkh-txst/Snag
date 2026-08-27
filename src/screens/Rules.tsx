@@ -75,7 +75,7 @@ function RuleCard({
         <>
           <span className="markwrap">
             <p className="rulecard__text">{rule.text}</p>
-            <SnagMark verdict={verdict} />
+            <SnagMark verdict={verdict} delay={i * 55} />
           </span>
         </>
       )}

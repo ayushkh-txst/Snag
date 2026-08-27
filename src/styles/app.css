@@ -333,12 +333,6 @@
 
 /* ── shared reveal ─────────────────────────────────────────────────── */
 
-@keyframes rise {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: none; }
-}
-.rise { animation: rise 620ms var(--ease-out) both; }
-
 .markwrap {
   display: inline-flex;
   flex-direction: column;

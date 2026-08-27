@@ -1,0 +1,127 @@
+import { useState } from "react";
+import { useParams } from "react-router-dom";
+import { NextBar, StepHead } from "../components/Shell";
+import { SnagMark } from "../components/SnagMark";
+import { byslug } from "../data";
+
+export function Fixes() {
+  const { slug } = useParams();
+  const ex = byslug(slug);
+  const [applied, setApplied] = useState<string[]>([]);
+
+  if (ex.fixes.length === 0) {
+    return (
+      <>
+        <StepHead
+          n="—"
+          title="Nothing to suggest."
+          lede="One rule still breaks, and Snag has no edit that would close it. A topic allowlist written in prose always has an edge; closing it properly means a classifier in front of the model, which is a change to the system rather than to the prompt. Snag says so instead of inventing a line that would not work."
+        />
+        <div className="nofix">
+          <p className="nofix__q">
+            An edit that does not verify is advice, and this tool does not give advice.
+          </p>
+        </div>
+        <NextBar
+          back={`/e/${ex.slug}/report`}
+          backLabel="Report"
+          next={`/e/${ex.slug}/history`}
+          nextLabel="Compare with earlier scans"
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StepHead
+        n="—"
+        title="Specific text, then proof it worked."
+        lede="Each suggestion is an edit to your prompt, not a note about what to consider. Applying one reruns only the attacks that succeeded, against the edited prompt, and shows you the before and after. Snag never rewrites your prompt itself — you apply the diff."
+        aside={
+          <div className="qstat">
+            <div className="qstat__n mono">{applied.length}<span className="dimmer"> / {ex.fixes.length}</span></div>
+            <div className="qstat__l">applied</div>
+          </div>
+        }
+      />
+
+      <div className="fixes">
+        {ex.fixes.map((f, i) => {
+          const rule = ex.rules.find((r) => r.id === f.ruleId)!;
+          const on = applied.includes(f.id);
+          return (
+            <article className="fix" key={f.id} data-on={on || undefined}>
+              <header className="fix__head">
+                <span className="fix__n mono">{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <span className="markwrap">
+                    <h2 className="fix__h">{rule.text}</h2>
+                    <SnagMark verdict={on ? "held" : "snagged"} />
+                  </span>
+                </div>
+                <button
+                  className="btn"
+                  data-variant={on ? "ghost" : "solid"}
+                  onClick={() =>
+                    setApplied((a) => (on ? a.filter((x) => x !== f.id) : [...a, f.id]))
+                  }
+                >
+                  {on ? "Applied — undo" : "Apply and verify"}
+                </button>
+              </header>
+
+              <div className="diff">
+                {f.removed.map((l, k) => (
+                  <div className="diff__line" data-k="del" key={`d${k}`}>
+                    <span className="diff__sign mono">−</span>
+                    <span className="mono">{l}</span>
+                  </div>
+                ))}
+                {f.added.map((l, k) => (
+                  <div className="diff__line" data-k="add" key={`a${k}`}>
+                    <span className="diff__sign mono">+</span>
+                    <span className="mono">{l}</span>
+                  </div>
+                ))}
+              </div>
+
+              <p className="fix__why">{f.rationale}</p>
+
+              <div className="verify" data-on={on || undefined}>
+                <div className="verify__side">
+                  <span className="label">before</span>
+                  <span className="verify__v mono" data-tone="snagged">{f.before}</span>
+                </div>
+                <div className="verify__arrow" aria-hidden="true">
+                  <svg width="34" height="10" viewBox="0 0 34 10">
+                    <path d="M0 5h30M26 1l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                  </svg>
+                </div>
+                <div className="verify__side">
+                  <span className="label">after the edit, rerun</span>
+                  <span className="verify__v mono" data-tone={on ? "held" : undefined}>
+                    {on ? f.after : "not run yet"}
+                  </span>
+                </div>
+                <p className="verify__note dim">
+                  {on
+                    ? "Only the attacks that succeeded were rerun, against the edited prompt. Nothing else was retested."
+                    : "Apply the edit to rerun the attacks that succeeded. Snag will not show you a number it has not measured."}
+                </p>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <NextBar
+        back={`/e/${ex.slug}/report`}
+        backLabel="Report"
+        next={`/e/${ex.slug}/history`}
+        nextLabel="Compare with earlier scans"
+        note="Tightening a prompt in one place regularly opens a hole in another. That is what the history view is for."
+      />
+    </>
+  );
+}

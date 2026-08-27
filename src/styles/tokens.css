@@ -1,0 +1,88 @@
+/* ── Snag design tokens ────────────────────────────────────────────────
+   Direction: "the marked-up page". Bone paper, ink, and pen colours that
+   encode a verdict — teal held, magenta snagged, amber needs-your-eyes,
+   graphite untestable. No gradients. No glow. ───────────────────────── */
+
+:root {
+  /* ground */
+  --paper:      #EDEEEA;
+  --paper-2:    #E4E6E0;
+  --paper-3:    #DBDDD6;
+  --card:       #F6F7F4;
+  --ink:        #14171C;
+  --ink-2:      #4E545C;
+  --ink-3:      #7C838C;
+  --rule:       #CFD2CA;
+  --rule-2:     #DFE1DA;
+
+  /* pen inks — verdict */
+  --held:       #0E6E64;
+  --held-soft:  #DCE9E5;
+  --snag:       #A81E5C;
+  --snag-soft:  #F2DDE6;
+  --eyes:       #B8791C;
+  --eyes-soft:  #F1E5CE;
+  --dead:       #7C838C;
+  --dead-soft:  #E3E5DE;
+
+  /* risk */
+  --risk-high:  #A81E5C;
+  --risk-med:   #B8791C;
+  --risk-low:   #0E6E64;
+  --risk-none:  #9AA1A8;
+
+  --focus:      #14171C;
+
+  /* type */
+  --display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --ui:      "Inter Tight", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono:    "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* scale — 1.0 / 1.125 / 1.333 / 1.777 / 2.37 / 3.16 */
+  --t-xs:   11px;
+  --t-sm:   12.5px;
+  --t-base: 14.5px;
+  --t-md:   17px;
+  --t-lg:   22px;
+  --t-xl:   31px;
+  --t-2xl:  44px;
+  --t-3xl:  clamp(38px, 7.2vw, 82px);
+
+  /* space — 4pt spine */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+  --s5: 24px; --s6: 32px; --s7: 48px; --s8: 64px; --s9: 96px;
+
+  --spine: 60px;
+  --shell: 1240px;
+  --radius: 3px;
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --ease-out: cubic-bezier(.16,1,.3,1);
+}
+
+:root[data-theme="dark"] {
+  --paper:      #101317;
+  --paper-2:    #171B20;
+  --paper-3:    #1F242A;
+  --card:       #161A1F;
+  --ink:        #E8EAE5;
+  --ink-2:      #A0A7AF;
+  --ink-3:      #737B84;
+  --rule:       #2A3037;
+  --rule-2:     #232930;
+
+  --held:       #43B5A5;
+  --held-soft:  #12292A;
+  --snag:       #F0578F;
+  --snag-soft:  #331624;
+  --eyes:       #E2A340;
+  --eyes-soft:  #2E2415;
+  --dead:       #737B84;
+  --dead-soft:  #1E2329;
+
+  --risk-high:  #F0578F;
+  --risk-med:   #E2A340;
+  --risk-low:   #43B5A5;
+  --risk-none:  #6C747C;
+
+  --focus:      #E8EAE5;
+}

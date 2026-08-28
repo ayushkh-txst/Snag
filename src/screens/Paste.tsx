@@ -1,17 +1,96 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Arrow } from "../components/ui";
-import { MODELS, examples } from "../data";
+import { examples } from "../data";
+import { createProject, getModels, getStoredKey, setStoredKey } from "../api/client";
+
+/** KEY-03: the picker is sourced from `GET /api/models` (the server's
+ * `ACCEPTED_MODELS` allowlist), never a static fixture. This is just
+ * cosmetic metadata for whichever ids that endpoint actually returns —
+ * an id outside this map still renders (with its raw id as the name). */
+const MODEL_META: Record<string, { name: string; vendor: string; note: string }> = {
+  "qwen/qwen3.8-flash": {
+    name: "Qwen3.8 Flash",
+    vendor: "Alibaba",
+    note: "Cheap and fast. Where prompts break most.",
+  },
+  "deepseek/deepseek-v4-flash-0731": {
+    name: "DeepSeek V4 Flash",
+    vendor: "DeepSeek",
+    note: "Cheap, strong instruction-following at small size.",
+  },
+  "openai/gpt-5.6-luna": {
+    name: "GPT-5.6 Luna",
+    vendor: "OpenAI",
+    note: "Compare against the cheap models to see what you traded.",
+  },
+};
+
+const FALLBACK_MODEL = "qwen/qwen3.8-flash";
+
+function modelMeta(id: string) {
+  return MODEL_META[id] ?? { name: id, vendor: "", note: "" };
+}
 
 export function Paste() {
   const nav = useNavigate();
-  const [model, setModel] = useState(MODELS[0].id);
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState(FALLBACK_MODEL);
   const [prompt, setPrompt] = useState("");
   const [tools, setTools] = useState("");
   const [ephemeral, setEphemeral] = useState(false);
+  const [apiKey, setApiKey] = useState(() => getStoredKey());
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const chosen = MODELS.find((m) => m.id === model)!;
-  const ready = prompt.trim().length > 0;
+  useEffect(() => {
+    let cancelled = false;
+    getModels()
+      .then((r) => {
+        if (cancelled) return;
+        // "fall back to the current default model string if the list is
+        // empty, so an unconfigured backend doesn't leave the picker blank"
+        const list = r.models.length > 0 ? r.models : [FALLBACK_MODEL];
+        setModels(list);
+        setModel((current) => (list.includes(current) ? current : list[0]));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setModels([FALLBACK_MODEL]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const chosen = modelMeta(model);
+  const ready = prompt.trim().length > 0 && !submitting;
+
+  const handleKeyChange = (value: string) => {
+    setApiKey(value);
+    setStoredKey(value);
+  };
+
+  const handleSubmit = async () => {
+    if (!ready) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const result = await createProject({
+        systemPrompt: prompt,
+        tools: tools.trim() || undefined,
+        model,
+        ephemeral,
+      });
+      nav(`/e/${result.slug}/rules`);
+    } catch {
+      // T-16-02-style: never surface the raw error body to the DOM.
+      setSubmitError(
+        "Couldn't create the project. Check your OpenRouter key (or leave it blank to use the server's own, if configured) and try again.",
+      );
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="shell paste">
@@ -88,28 +167,53 @@ RETRIEVED CONTEXT
               <span className="label">Model to test against</span>
             </div>
             <div className="modellist">
-              {MODELS.map((m) => (
-                <label className="modelrow" key={m.id} data-on={m.id === model || undefined}>
-                  <input
-                    type="radio"
-                    name="model"
-                    value={m.id}
-                    checked={m.id === model}
-                    onChange={() => setModel(m.id)}
-                  />
-                  <span className="modelrow__body">
-                    <span className="modelrow__top">
-                      <span className="modelrow__name">{m.name}</span>
-                      <span className="modelrow__price mono">{m.price}</span>
+              {models.map((id) => {
+                const meta = modelMeta(id);
+                return (
+                  <label className="modelrow" key={id} data-on={id === model || undefined}>
+                    <input
+                      type="radio"
+                      name="model"
+                      value={id}
+                      checked={id === model}
+                      onChange={() => setModel(id)}
+                    />
+                    <span className="modelrow__body">
+                      <span className="modelrow__top">
+                        <span className="modelrow__name">{meta.name}</span>
+                        {meta.vendor && <span className="modelrow__price mono">{meta.vendor}</span>}
+                      </span>
+                      {meta.note && <span className="modelrow__note">{meta.note}</span>}
                     </span>
-                    <span className="modelrow__note">{m.note}</span>
-                  </span>
-                </label>
-              ))}
+                  </label>
+                );
+              })}
             </div>
             <p className="field__hint dim">
               Testing {chosen.name}. Prompts break most on the cheap fast models, which is
               usually what production is running.
+            </p>
+          </div>
+
+          <div className="field">
+            <div className="field__head">
+              <label className="label" htmlFor="apikey">Your OpenRouter key</label>
+              <span className="field__req mono">optional · BYOK</span>
+            </div>
+            <input
+              id="apikey"
+              className="field__area mono"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="sk-or-v1-…"
+              value={apiKey}
+              onChange={(e) => handleKeyChange(e.target.value)}
+            />
+            <p className="field__hint dim">
+              Kept only in this browser's local storage for the session, sent as a header on
+              every request that spends money. Leave it blank to use the server's own key, if
+              one is configured.
             </p>
           </div>
 
@@ -138,13 +242,16 @@ RETRIEVED CONTEXT
               className="btn"
               data-variant="solid"
               disabled={!ready}
-              onClick={() => nav("/e/retail-support-bot/rules")}
+              onClick={() => void handleSubmit()}
             >
-              Extract the rules <Arrow />
+              {submitting ? "Extracting…" : <>Extract the rules <Arrow /></>}
             </button>
-            <p className="dim paste__gonote">
-              One model call. Nothing is attacked yet — you confirm every rule first.
-            </p>
+            {submitError && <p className="dim paste__gonote">{submitError}</p>}
+            {!submitError && (
+              <p className="dim paste__gonote">
+                One model call. Nothing is attacked yet — you confirm every rule first.
+              </p>
+            )}
           </div>
         </aside>
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useParams } from "react-router-dom";
-import { byslug, examples } from "../data";
+import { examples } from "../data";
 
 const WORDMARK = (
   <svg className="wordmark" width="72" height="22" viewBox="0 0 72 22" aria-hidden="true">
@@ -42,7 +42,12 @@ export function TopBar() {
   const loc = useLocation();
   const inApp = loc.pathname.startsWith("/e/");
   const { slug } = useParams();
-  const ex = inApp ? byslug(slug) : null;
+  // 01-17: `byslug` silently falls back to the retail fixture for any slug
+  // it doesn't recognise — fine for cosmetic display here, but ONLY the raw
+  // route `slug` (never `ex.slug`) may ever be used to build a nav link
+  // below, or every real (non-fixture) project would be redirected into the
+  // wrong project on the first click.
+  const knownExample = inApp ? examples.find((e) => e.slug === slug) : undefined;
 
   return (
     <header className="topbar">
@@ -52,10 +57,10 @@ export function TopBar() {
           <span className="brand__name">Snag</span>
         </Link>
 
-        {ex && (
+        {inApp && (
           <div className="topbar__project">
-            <span className="label">example {ex.n}</span>
-            <span className="topbar__projname">{ex.title}</span>
+            <span className="label">{knownExample ? `example ${knownExample.n}` : "your project"}</span>
+            <span className="topbar__projname">{knownExample ? knownExample.title : slug}</span>
           </div>
         )}
 
@@ -91,7 +96,10 @@ export function Spine() {
   const { slug } = useParams();
   const loc = useLocation();
   const railRef = useRef<HTMLElement>(null);
-  const ex = byslug(slug);
+  // 01-17: use the raw route `slug` for every nav link below — `byslug`'s
+  // silent fallback-to-retail would otherwise redirect a real (non-fixture)
+  // project into the wrong project's pages the moment this rail renders.
+  const currentSlug = slug ?? "";
   const current = loc.pathname.split("/")[3] ?? "rules";
   const idx = STEPS.findIndex((s) => s.key === current);
 
@@ -109,7 +117,7 @@ export function Spine() {
         {STEPS.map((s, i) => (
           <li key={s.key}>
             <NavLink
-              to={`/e/${ex.slug}/${s.key}`}
+              to={`/e/${currentSlug}/${s.key}`}
               className="spine__step"
               data-state={i < idx ? "done" : i === idx ? "here" : "ahead"}
             >
@@ -123,7 +131,7 @@ export function Spine() {
         {AFTER.map((s) => (
           <NavLink
             key={s.key}
-            to={`/e/${ex.slug}/${s.key}`}
+            to={`/e/${currentSlug}/${s.key}`}
             className="spine__step"
             data-state={current === s.key ? "here" : "ahead"}
           >
@@ -140,7 +148,7 @@ export function Spine() {
               key={e.slug}
               to={`/e/${e.slug}/${STEPS[Math.max(idx, 0)]?.key ?? "rules"}`}
               className="spine__ex"
-              data-on={e.slug === ex.slug || undefined}
+              data-on={e.slug === currentSlug || undefined}
               title={e.title}
             >
               {e.n}

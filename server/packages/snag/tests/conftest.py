@@ -9,7 +9,7 @@ anywhere in this package's tests.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import httpx
@@ -19,7 +19,10 @@ from snag.api import ratelimit
 from snag.api.app import create_app
 from snag.api.deps import get_completions
 from snag.config import get_settings
-from substrate.llm import FakeCompletions
+from snag.runner import KIND_SCAN, QUEUE_NAME, make_scan_handler
+from substrate.db import Database
+from substrate.llm import Completions, FakeCompletions
+from substrate.queue import JobQueue, Worker
 
 
 @asynccontextmanager
@@ -57,3 +60,25 @@ ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.As
 def client_factory() -> ClientFactory:
     """`async with client_factory(fake) as client: ...` — see `running_app`."""
     return running_app
+
+
+async def _drain_scan_queue(db: Database, completions: Completions) -> Worker:
+    """01-09: `POST /api/scans` only enqueues a job — a test that wants the
+    scan to actually run drains the queue itself, exactly like a `snag
+    work` worker would, using the SAME `FakeCompletions` double the test
+    already scripted (the app's own DI override only reaches requests, not
+    an out-of-band worker loop)."""
+    queue = JobQueue(db, queue=QUEUE_NAME)
+    worker = Worker(queue, concurrency=1, poll_interval=0.01)
+    worker.register(KIND_SCAN, make_scan_handler(db, completions))
+    await worker.run_until_idle()
+    return worker
+
+
+DrainScanQueue = Callable[[Database, Completions], Awaitable[Worker]]
+
+
+@pytest.fixture
+def drain_scan_queue() -> DrainScanQueue:
+    """`worker = await drain_scan_queue(db, fake)` — see `_drain_scan_queue`."""
+    return _drain_scan_queue

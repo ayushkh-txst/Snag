@@ -1,145 +1,144 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { byslug, type Question } from "../data";
+import { byslug, type Example, type Question } from "../data";
 
-const STATUS_WORD: Record<Question["status"], string> = {
-  open: "waiting on you",
-  answered: "answered",
-  inferred: "inferred from your prompt",
-  skipped: "skipped — reported as untestable",
-  conflict: "contradiction — needs a decision",
-};
+function QuestionCard({
+  q,
+  ex,
+  followUp = false,
+}: {
+  q: Question;
+  ex: Example;
+  followUp?: boolean;
+}) {
+  const [answer, setAnswer] = useState(q.answerRaw ?? "");
+  const [confirmed, setConfirmed] = useState(Boolean(q.answerNormalized) || q.status === "skipped");
+  const rule = ex.rules.find((r) => r.id === q.ruleId);
 
-const STYLES = [
-  { k: "A list", v: "Nike, Adidas, New Balance", d: "passed through as written" },
-  { k: "A description", v: "mostly the big sportswear brands, and that place on 5th", d: "normalized into a concrete list" },
-  { k: "Nothing", v: "you pick · figure it out · (blank)", d: "inferred from the prompt's own context" },
-  { k: "A refusal", v: "skip this one", d: "rule marked untestable and reported that way" },
-];
+  if (q.status === "conflict") {
+    return (
+      <article className="q" data-followup={followUp || undefined}>
+        <p className="q__rule">{rule?.text}</p>
+        <p className="q__text">{q.text}</p>
+        <div className="conflict">
+          <p className="conflict__tag mono">your prompt says both</p>
+          <p>{q.conflictNote}</p>
+          <div className="conflict__acts">
+            <button className="btn" data-variant="ghost">Keep it confidential</button>
+            <button className="btn" data-variant="ghost">Allow a summary</button>
+            <button className="btn" data-variant="quiet">Don't test this rule</button>
+          </div>
+        </div>
+      </article>
+    );
+  }
+
+  const skipped = answer.trim().toLowerCase().startsWith("skip");
+
+  return (
+    <article className="q" data-followup={followUp || undefined}>
+      {followUp && <p className="q__from mono">raised by your last answer</p>}
+      <p className="q__rule">{rule?.text}</p>
+      <p className="q__text">{q.text}</p>
+
+      <div className="q__row">
+        <input
+          className="q__in"
+          value={answer}
+          placeholder={q.placeholder}
+          onChange={(e) => {
+            setAnswer(e.target.value);
+            setConfirmed(false);
+          }}
+        />
+        <button
+          className="btn"
+          data-variant={confirmed ? "ghost" : "solid"}
+          disabled={confirmed}
+          onClick={() => setConfirmed(true)}
+        >
+          {confirmed ? "Confirmed" : "Confirm"}
+        </button>
+      </div>
+
+      {confirmed ? (
+        skipped || q.status === "skipped" ? (
+          <div className="answer" data-tone="eyes">
+            <span className="label">so this rule</span>
+            <p>Won't be tested. It appears in the report under "needs your eyes".</p>
+          </div>
+        ) : (
+          <div className="answer">
+            <span className="label">
+              {q.status === "inferred" ? "worked out from your prompt — change it if it's wrong" : "what gets checked"}
+            </span>
+            <p className="mono">{q.answerNormalized}</p>
+          </div>
+        )
+      ) : (
+        <p className="q__pending dim">
+          Confirm to see the exact thing that will be checked.
+        </p>
+      )}
+    </article>
+  );
+}
 
 export function Questions() {
   const { slug } = useParams();
   const ex = byslug(slug);
-  const [answers, setAnswers] = useState<Record<string, string>>(() =>
-    Object.fromEntries(ex.questions.map((q) => [q.id, q.answerRaw ?? ""])),
-  );
 
-  const rounds = useMemo(() => {
-    const map = new Map<number, Question[]>();
-    ex.questions.forEach((q) => {
-      map.set(q.round, [...(map.get(q.round) ?? []), q]);
-    });
-    return [...map.entries()].sort((a, b) => a[0] - b[0]);
+  const { top, follows } = useMemo(() => {
+    const first = new Map<string, Question>();
+    const later: Question[] = [];
+    [...ex.questions]
+      .sort((a, b) => a.round - b.round)
+      .forEach((q) => {
+        if (first.has(q.ruleId)) later.push(q);
+        else first.set(q.ruleId, q);
+      });
+    return { top: [...first.values()], follows: later };
   }, [ex]);
-
-  const ruleText = (id: string) => ex.rules.find((r) => r.id === id)?.text ?? "";
-  const openCount = ex.questions.filter((q) => q.status === "open" || q.status === "conflict").length;
 
   return (
     <>
       <StepHead
         n="02"
-        title="Some checkers still have blanks."
-        lede="A rule like never mention competitors needs a list before code can check it. Answer however you like — a list, a sentence, or nothing at all. Whatever you type comes back as the literal thing that will be checked, before anything runs."
+        title="A few rules need one more detail."
+        lede="Answer however you like — a list, a sentence, or nothing at all. Confirming turns your answer into the exact thing Snag will check."
         aside={
           <div className="qstat">
             <div className="qstat__n mono">{ex.questions.length}</div>
-            <div className="qstat__l">questions across {rounds.length} rounds</div>
+            <div className="qstat__l">to answer</div>
           </div>
         }
       />
 
-      <div className="styleband">
-        {STYLES.map((s) => (
-          <div className="styleband__col" key={s.k}>
-            <div className="label">{s.k}</div>
-            <div className="styleband__v mono">{s.v}</div>
-            <div className="styleband__d">{s.d}</div>
+      <div className="qlist">
+        {top.map((q) => (
+          <div className="qthread" key={q.id}>
+            <QuestionCard q={q} ex={ex} />
+            {follows
+              .filter((f) => f.ruleId === q.ruleId)
+              .map((f) => (
+                <QuestionCard key={f.id} q={f} ex={ex} followUp />
+              ))}
           </div>
         ))}
       </div>
 
-      {rounds.map(([n, qs]) => (
-        <section className="round" key={n}>
-          <header className="round__head">
-            <span className="round__n mono">round {n}</span>
-            <span className="round__rule" />
-            <span className="mono dimmer">
-              {n === 1
-                ? "asked after the first extraction pass"
-                : `raised by what you answered in round ${n - 1}`}
-            </span>
-          </header>
-
-          <div className="qlist">
-            {qs.map((q) => (
-              <article className="qcard" key={q.id} data-status={q.status}>
-                <div className="qcard__l">
-                  <p className="qcard__for label">for rule</p>
-                  <p className="qcard__rule">{ruleText(q.ruleId)}</p>
-                </div>
-                <div className="qcard__r">
-                  <p className="qcard__q">{q.text}</p>
-
-                  {q.status === "conflict" ? (
-                    <div className="conflict">
-                      <p className="conflict__tag mono">contradiction</p>
-                      <p>{q.conflictNote}</p>
-                      <div className="conflict__acts">
-                        <button className="btn" data-variant="ghost">Confidentiality wins</button>
-                        <button className="btn" data-variant="ghost">Summaries are allowed</button>
-                        <button className="btn" data-variant="quiet">Skip this rule</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <input
-                        className="qcard__in mono"
-                        value={answers[q.id] ?? ""}
-                        placeholder={q.placeholder}
-                        onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                      />
-                      <p className="qcard__status mono" data-status={q.status}>
-                        {STATUS_WORD[q.status]}
-                      </p>
-                      {q.answerNormalized && (
-                        <div className="normalized">
-                          <p className="label">what will actually be checked</p>
-                          <p className="normalized__v mono">{q.answerNormalized}</p>
-                        </div>
-                      )}
-                      {q.status === "skipped" && (
-                        <div className="normalized" data-tone="eyes">
-                          <p className="label">what happens instead</p>
-                          <p className="normalized__v mono">
-                            checker_type = none · rule appears in the report under "needs your eyes"
-                          </p>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      ))}
-
-      <div className="roundstop">
-        <p>
-          Rounds stop after three, or when nothing is left — whichever comes first.
-          {openCount > 0
-            ? ` ${openCount} question${openCount === 1 ? "" : "s"} still open; leaving them will mark those rules untestable rather than guessing.`
-            : " Nothing is left open."}
-        </p>
-      </div>
+      <p className="qfoot dim">
+        Confirming an answer is one model call. Answering can raise a follow-up, which
+        appears under the answer that raised it. Nothing is attacked until you start the
+        scan.
+      </p>
 
       <NextBar
         back={`/e/${ex.slug}/rules`}
         backLabel="Rules"
         next={`/e/${ex.slug}/surfaces`}
-        nextLabel="Map the injection points"
+        nextLabel="Next"
       />
     </>
   );

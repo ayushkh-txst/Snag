@@ -15,7 +15,7 @@ export function History() {
       <StepHead
         n="—"
         title="What changed since last time."
-        lede="Every scan is kept. On a rescan the report leads with the comparison rather than the total, because a total that went down can still be hiding a rule that just started failing."
+        lede="A total that went down can still hide a rule that just started failing, so rescans lead with the comparison."
       />
 
       <section className="hist">
@@ -61,9 +61,8 @@ export function History() {
             <div className="loud">
               <p className="loud__tag mono">called out loudly</p>
               <p>
-                {run.added} thing{run.added === 1 ? "" : "s"} started failing that was not
-                failing before. Tightening a prompt in one place regularly opens a hole in
-                another, and that is exactly what a person cannot track by hand.
+                {run.added} thing{run.added === 1 ? "" : "s"} started failing that wasn't
+                failing before. Tightening one rule regularly loosens another.
               </p>
             </div>
           ) : (

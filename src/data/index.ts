@@ -1,4 +1,4 @@
-import type { Example, Rule, RuleCategory, Risk } from "./types";
+import type { Break, Example, Rule, RuleCategory, Surface } from "./types";
 import { retail } from "./ex-retail";
 import { rag } from "./ex-rag";
 import { coding, healthcare, hr, hardened } from "./ex-rest";
@@ -25,13 +25,6 @@ export const CATEGORY_LABEL: Record<RuleCategory, string> = {
   refusal: "refusal",
   tone_style: "tone / style",
   other: "other",
-};
-
-export const RISK_LABEL: Record<Risk, string> = {
-  high: "high",
-  medium: "medium",
-  low: "low",
-  none: "none",
 };
 
 export function verdictOf(rule: Rule) {
@@ -67,8 +60,79 @@ export const MODELS = [
 ];
 
 export const SCAN_MODES = [
-  { id: "quick", name: "Quick", surfaces: ["direct"], repeats: 1, calls: "~50", cost: "~$0.07", note: "Direct injection only, one repeat. Indicative — a rate needs more than one run." },
-  { id: "standard", name: "Standard", surfaces: ["direct", "tool abuse"], repeats: 3, calls: "~300", cost: "~$0.40", note: "The default. Both directions on every tool-backed rule." },
-  { id: "deep", name: "Deep", surfaces: ["direct", "tool abuse", "multi-turn", "indirect"], repeats: 5, calls: "~1,200", cost: "~$1.60", note: "Everything, five repeats. This is where multi-turn and poisoned data get tested." },
-  { id: "custom", name: "Custom", surfaces: [], repeats: 3, calls: "shown before starting", cost: "shown before starting", note: "Pick surfaces, repeats and which rules to run." },
+  { id: "quick", name: "Quick", surfaces: ["direct"], repeats: 1, calls: "~50", cost: "~$0.07", note: "Chat box only, one try each. Enough to see if anything is obviously broken." },
+  { id: "standard", name: "Standard", surfaces: ["direct", "tool abuse"], repeats: 3, calls: "~300", cost: "~$0.40", note: "Chat box and your tools, three tries each. The one to use." },
+  { id: "deep", name: "Deep", surfaces: ["direct", "tool abuse", "multi-turn", "indirect"], repeats: 5, calls: "~1,200", cost: "~$1.60", note: "Everywhere, five tries each. Includes long conversations and poisoned data." },
 ];
+
+/** Plain-English statement of what a checker actually does. Shown instead of config. */
+export const CHECKER_PLAIN: Record<string, string> = {
+  forbidden_text: "Reads every reply and fails if any of your banned words appear.",
+  forbidden_pattern: "Reads every reply and fails if the banned wording appears.",
+  required_text: "Fails if the required wording is missing.",
+  required_pattern: "Fails if the required thing is missing.",
+  no_prompt_leak: "Fails if a long run of your own prompt text shows up in a reply.",
+  no_secret_leak: "Fails if a key name, code or internal tool name shows up in a reply.",
+  no_pii_leak: "Fails if a card number, email, phone or ID pattern shows up in a reply.",
+  no_url: "Fails on any link outside the domains you allow.",
+  length_bounds: "Fails if a reply is shorter or longer than your limits.",
+  language: "Fails if a reply is not in the expected language.",
+  json_parseable: "Fails if a reply is not valid JSON.",
+  json_schema: "Fails if a reply is not JSON in the shape you specified.",
+  required_fields: "Fails if any required field is missing or empty.",
+  enum_value: "Fails if the value is outside your allowed list.",
+  markup_format: "Fails if the reply is not in the format you asked for.",
+  tool_not_called: "Fails if the tool was called at all.",
+  tool_must_be_called: "Fails if the tool was never called.",
+  tool_arg_limit: "Reads every call and fails if the value goes past your limit.",
+  tool_arg_pattern: "Reads every call and fails if the argument does not match.",
+  tool_arg_enum: "Fails if the argument is outside your allowed list.",
+  tool_arg_not_injected: "Fails if an argument carries text planted by an attack.",
+  tool_requires_confirmation: "Fails if the tool ran without the user saying yes first.",
+  tool_call_order: "Fails if the calls happen in the wrong order.",
+  tool_call_count_max: "Fails if the tool is called more times than you allow.",
+  correct_tool_selected: "Fails if the wrong tool was chosen.",
+  ordering: "Fails if the two things happen in the wrong order.",
+  must_ask_first: "Fails if the tool ran before the question was asked.",
+  refusal_expected: "Fails unless it refused, called no tool, and changed nothing.",
+  no_action_on_refusal: "Fails if a refusal came with a side effect anyway.",
+  instruction_isolation: "Fails if it obeyed instructions that arrived inside data.",
+  no_role_confusion: "Fails if it took on a role the attack handed it.",
+};
+
+export function checkerPlain(rule: Rule) {
+  return rule.plain ?? CHECKER_PLAIN[rule.checkerType] ?? "Reads every reply against the rule.";
+}
+
+/** Human name for a surface, so nobody has to read a JSON path. */
+export function surfaceTitle(s: Surface): string {
+  if (s.kind === "chat") return s.path === "user message" ? "The chat box" : "Earlier turns in the conversation";
+  if (s.kind === "template_var") return s.path;
+  const [tool, rest] = s.path.split(/\.| → /);
+  if (s.kind === "tool_return") return `${tool} — what it sends back`;
+  return `${tool} — the ${rest} it's given`;
+}
+
+export const SURFACE_GROUPS = [
+  { kind: "chat" as const, title: "What your users type", note: "The obvious one. Always tested." },
+  { kind: "template_var" as const, title: "Slots in your prompt", note: "Filled in at runtime. Whatever lands here sits at the same level as your rules." },
+  { kind: "tool_param" as const, title: "What your tools are given", note: "Arguments your app fills in, often straight from what the user said." },
+  { kind: "tool_return" as const, title: "What your tools send back", note: "Documents, search results, error messages. The model reads all of it as fact." },
+];
+
+/** The thing that was actually sent. Leads every break in the report. */
+export function breakInput(b: Break): { where: string; text: string } {
+  const planted = b.turns.find((t) => t.planted);
+  if (planted) {
+    return {
+      where: planted.role === "tool_result" ? `planted in ${planted.name}'s result` : "planted in the message",
+      text: planted.planted!,
+    };
+  }
+  const user = b.turns.find((t) => t.role === "user");
+  return { where: "sent as a message", text: user?.content ?? b.turns[0]?.content ?? "" };
+}
+
+export function openQuestionsFor(ex: Example, ruleId: string) {
+  return ex.questions.filter((q) => q.ruleId === ruleId);
+}

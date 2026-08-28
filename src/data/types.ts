@@ -44,6 +44,8 @@ export interface Rule {
   confidence: number;
   attacks: number;
   breaks: number;
+  /** Overrides the generic plain-English description of the checker. */
+  plain?: string;
   /** Set when checkerType is 'none' — why code can't test it. */
   untestableReason?: string;
 }

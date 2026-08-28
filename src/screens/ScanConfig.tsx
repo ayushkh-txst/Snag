@@ -31,7 +31,7 @@ export function ScanConfig() {
       <StepHead
         n="04"
         title="Decide what this is going to cost."
-        lede="Models are random. An attack that fails once may land one time in five, so every attack runs more than once and the report shows a rate rather than a yes or no. Both caps below are enforced before a call is dispatched, not after."
+        lede="Models are random, so every attack runs more than once and you get a rate rather than a yes or no. Both caps stop the scan before a call is sent, not after."
       />
 
       <section className="modes">
@@ -66,7 +66,7 @@ export function ScanConfig() {
                 <input
                   type="checkbox"
                   checked={on.includes(s.id)}
-                  onChange={() => { toggle(s.id); setMode("custom"); }}
+                  onChange={() => { toggle(s.id); setMode(""); }}
                 />
                 <span>
                   <span className="surfopt__l">{s.label}</span>
@@ -83,14 +83,14 @@ export function ScanConfig() {
               min={1}
               max={10}
               value={repeats}
-              onChange={(e) => { setRepeats(+e.target.value); setMode("custom"); }}
+              onChange={(e) => { setRepeats(+e.target.value); setMode(""); }}
             />
             <span className="repeats__v mono">{repeats}×</span>
           </div>
           <p className="dim repeats__note">
             {repeats === 1
-              ? "One run per attack. The report will say the result is indicative only — a single run cannot produce a rate."
-              : `Each attack runs ${repeats} times. The report shows how often it landed, not whether it landed.`}
+              ? "One try each. The report will say so — one run can't give you a rate."
+              : `Each attack is tried ${repeats} times.`}
           </p>
         </div>
 
@@ -119,9 +119,8 @@ export function ScanConfig() {
             </span>
           </div>
           <p className="budget__note dim">
-            A runaway scan is the obvious failure mode, so the cap is checked before each
-            call is sent rather than totalled afterwards. The scan stops at the cap and
-            tells you what it did not run.
+            Checked before each call is sent. The scan stops at the cap and tells you what
+            it didn't get to.
           </p>
 
           <div className="budget__est">
@@ -138,10 +137,7 @@ export function ScanConfig() {
               <span className="mono">{ex.model}</span>
             </div>
           </div>
-          <p className="budget__note dim">
-            Estimates, not promises. The running total is shown live and the real figure
-            appears in the report.
-          </p>
+          <p className="budget__note dim">Estimates. The running total is shown live.</p>
         </aside>
       </div>
 
@@ -150,7 +146,6 @@ export function ScanConfig() {
         backLabel="Surfaces"
         next={`/e/${ex.slug}/scanning`}
         nextLabel="Start the scan"
-        note={`${ex.rules.filter((r) => r.testable).length} rules will be tested. ${ex.rules.filter((r) => !r.testable).length} will be reported as needing your eyes.`}
       />
     </>
   );

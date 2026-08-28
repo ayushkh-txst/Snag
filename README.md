@@ -71,10 +71,21 @@ Everything else stays quiet. No gradients, no glow, no ambient motion.
 ## What is deliberately not here
 
 - No functionality. Nothing calls a model, nothing persists, nothing is scanned.
-- Interactions that hold local state — editing a rule, unticking a surface, applying
-  a fix, marking a false positive — are UI state only, so the flow can be judged.
+- Interactions that hold local state — ticking a rule, adding one, unticking a
+  surface, confirming an answer, applying a fix, marking a false positive — are UI
+  state only, so the flow can be judged.
 - Numbers Snag has not measured are not shown. An unapplied fix reports "not run
-  yet" rather than the result it would produce.
+  yet". An unconfirmed answer shows no check.
+- Checker configuration is not shown on the rules screen, because at that point in
+  the flow the blanks have not been filled in yet.
+
+## Fixture invariants
+
+Two things the fixtures must keep true, since the UI now leans on both:
+
+- Every rule with `breaks > 0` has at least one stored attack run, because the report
+  leads with the text that broke it.
+- `sum(run.hits) === rule.breaks`, and `sum(rule.attacks) <= scan.calls`.
 
 ## Layout
 

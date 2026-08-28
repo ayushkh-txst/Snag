@@ -33,24 +33,6 @@ export function RiskDot({ risk, withLabel = false }: { risk: Risk; withLabel?: b
   );
 }
 
-export function Button({
-  as = "button",
-  variant = "ghost",
-  children,
-  ...rest
-}: {
-  as?: "button" | "span";
-  variant?: "solid" | "ghost" | "quiet";
-  children: ReactNode;
-} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  const Tag = as as "button";
-  return (
-    <Tag className="btn" data-variant={variant} {...rest}>
-      {children}
-    </Tag>
-  );
-}
-
 export function Arrow() {
   return (
     <svg className="arrow" width="16" height="10" viewBox="0 0 16 10" aria-hidden="true">
@@ -85,42 +67,6 @@ export function Coverage({
   );
 }
 
-export function Panel({
-  label,
-  aside,
-  children,
-  className = "",
-}: {
-  label?: string;
-  aside?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`panel ${className}`}>
-      {(label || aside) && (
-        <header className="panel__head">
-          {label && <span className="label">{label}</span>}
-          {aside && <div className="panel__aside">{aside}</div>}
-        </header>
-      )}
-      {children}
-    </section>
-  );
-}
-
-export function Stat({ n, unit, label, tone }: { n: ReactNode; unit?: string; label: string; tone?: Verdict }) {
-  return (
-    <div className="stat" data-tone={tone}>
-      <div className="stat__n">
-        {n}
-        {unit && <span className="stat__unit">{unit}</span>}
-      </div>
-      <div className="stat__label">{label}</div>
-    </div>
-  );
-}
-
 /** Renders text with one substring marked — planted attack text, or a checker's evidence. */
 export function Marked({
   text,
@@ -141,26 +87,5 @@ export function Marked({
       </mark>
       {text.slice(i + mark.length)}
     </>
-  );
-}
-
-export function CheckerConfig({ type, config }: { type: string; config?: Record<string, unknown> }) {
-  const entries = Object.entries(config ?? {});
-  return (
-    <div className="checker">
-      <div className="checker__type mono">{type}</div>
-      {entries.length > 0 && (
-        <dl className="checker__grid">
-          {entries.map(([k, v]) => (
-            <div key={k} className="checker__row">
-              <dt className="mono">{k}</dt>
-              <dd className="mono">
-                {typeof v === "object" ? JSON.stringify(v, null, 1).replace(/\n\s*/g, " ") : String(v)}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      )}
-    </div>
   );
 }

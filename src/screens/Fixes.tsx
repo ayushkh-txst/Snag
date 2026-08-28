@@ -15,7 +15,7 @@ export function Fixes() {
         <StepHead
           n="—"
           title="Nothing to suggest."
-          lede="One rule still breaks, and Snag has no edit that would close it. A topic allowlist written in prose always has an edge; closing it properly means a classifier in front of the model, which is a change to the system rather than to the prompt. Snag says so instead of inventing a line that would not work."
+          lede="One rule still breaks and no edit would close it. A list of allowed topics written in prose always has an edge; closing it properly means a classifier in front of the model, which is a change to your system, not your prompt."
         />
         <div className="nofix">
           <p className="nofix__q">
@@ -37,7 +37,7 @@ export function Fixes() {
       <StepHead
         n="—"
         title="Specific text, then proof it worked."
-        lede="Each suggestion is an edit to your prompt, not a note about what to consider. Applying one reruns only the attacks that succeeded, against the edited prompt, and shows you the before and after. Snag never rewrites your prompt itself — you apply the diff."
+        lede="Actual text, not advice. Applying one reruns the attacks that worked against the edited prompt. You apply the diff yourself — Snag never touches your prompt."
         aside={
           <div className="qstat">
             <div className="qstat__n mono">{applied.length}<span className="dimmer"> / {ex.fixes.length}</span></div>
@@ -120,7 +120,6 @@ export function Fixes() {
         backLabel="Report"
         next={`/e/${ex.slug}/history`}
         nextLabel="Compare with earlier scans"
-        note="Tightening a prompt in one place regularly opens a hole in another. That is what the history view is for."
       />
     </>
   );

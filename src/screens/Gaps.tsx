@@ -23,7 +23,7 @@ export function Gaps() {
       <StepHead
         n="—"
         title="What your prompt never says."
-        lede="A gap is not a failure. It is a place the prompt is silent, so the model does whatever seems reasonable at the time. These are not scored — Snag sends a probe into each area and shows you what came back."
+        lede="Places your prompt is silent, so the model decided for itself. Probed during the same scan, one call per area. Not scored — just what happened."
         aside={
           <div className="qstat">
             <div className="qstat__n mono">{ex.gaps.length - covered.length}</div>
@@ -56,11 +56,7 @@ export function Gaps() {
       </div>
 
       <section className="checklist">
-        <p className="eyebrow">the checklist these came from</p>
-        <p className="dim checklist__lede">
-          A maintained list of what production prompts should cover and usually do not.
-          Snag probes each one whether or not your prompt mentions it.
-        </p>
+        <p className="eyebrow">every area Snag probes</p>
         <ul className="checklist__grid">
           {CHECKLIST.map((c) => {
             const tail = c.toLowerCase().split(" ").slice(-3).join(" ");

@@ -1,133 +1,115 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { RiskDot } from "../components/ui";
-import { byslug, type Surface } from "../data";
+import { SURFACE_GROUPS, byslug, surfaceTitle, type Surface } from "../data";
 
-const KIND_WORD: Record<Surface["kind"], string> = {
-  template_var: "prompt template",
-  tool_param: "tool parameter",
-  tool_return: "tool output",
-  chat: "chat input",
+const RISK_WHY: Record<Surface["risk"], string> = {
+  high: "anything can go in here",
+  medium: "limited, but not tightly",
+  low: "tightly limited",
+  none: "nothing to put here",
 };
-
-const SHAPES = [
-  { shape: "free-text string", risk: "high", why: "arbitrary text reaches the model" },
-  { shape: "string with a pattern", risk: "medium", why: "constrained, but usually loosely" },
-  { shape: "number with no bounds", risk: "medium", why: "can be pushed past a business limit" },
-  { shape: "enum", risk: "low", why: "closed set" },
-  { shape: "boolean", risk: "none", why: "two values" },
-  { shape: "object / array", risk: "medium", why: "recursed into, field by field" },
-] as const;
 
 export function Surfaces() {
   const { slug } = useParams();
   const ex = byslug(slug);
   const [surfaces, setSurfaces] = useState<Surface[]>(ex.surfaces);
 
-  const totalTests = surfaces.filter((s) => s.userControlled).reduce((n, s) => n + s.tests, 0);
-  const templateVars = surfaces.filter((s) => s.kind === "template_var");
+  const on = surfaces.filter((s) => s.userControlled && s.risk !== "none");
+  const total = on.reduce((n, s) => n + s.tests, 0);
+  const slots = surfaces.filter((s) => s.kind === "template_var");
+
+  const toggle = (id: string) =>
+    setSurfaces((xs) =>
+      xs.map((x) => (x.id === id ? { ...x, userControlled: !x.userControlled } : x)),
+    );
 
   return (
     <>
       <StepHead
         n="03"
-        title="Every place text reaches your model."
-        lede="Attacks do not only arrive as a chat message. They arrive in a retrieved document, a tool argument, a search result, an error string. Snag found these by reading your prompt template and your tool schemas. Untick anything that is not attacker-controlled — testing a session-derived user_id just spends money."
+        title="Where can someone else's words reach your model?"
+        lede="Not just the chat box. Untick anything that can't be influenced from outside — testing it only costs you money."
         aside={
           <div className="qstat">
-            <div className="qstat__n mono">{totalTests}</div>
-            <div className="qstat__l">tests queued across {surfaces.filter((s) => s.userControlled).length} surfaces</div>
+            <div className="qstat__n mono">{total}</div>
+            <div className="qstat__l">attacks across {on.length} places</div>
           </div>
         }
       />
 
-      {templateVars.length > 0 && (
+      {slots.length > 0 && (
         <div className="warnband">
-          <div className="warnband__mark mono">highest severity</div>
           <div>
             <p className="warnband__h">
-              {templateVars.length === 1 ? "One slot in" : `${templateVars.length} slots in`} your
-              system prompt {templateVars.length === 1 ? "is" : "are"} filled at runtime.
+              Your prompt has {slots.length === 1 ? "a slot" : `${slots.length} slots`} that
+              get filled in at runtime.
             </p>
             <p className="warnband__b">
-              Text landing in{" "}
-              {templateVars.map((t, i) => (
+              Whatever lands in{" "}
+              {slots.map((t, i) => (
                 <span key={t.id}>
                   <code className="mono">{t.path}</code>
-                  {i < templateVars.length - 1 ? ", " : " "}
+                  {i < slots.length - 1 ? ", " : " "}
                 </span>
               ))}
-              sits at the same level as your rules. There is no marker in the prompt telling
-              the model where your instructions stop and the data starts, so it has no way
-              to tell them apart.
+              is read as part of your instructions, not as something you're quoting. One
+              poisoned document there can undo every rule above it.
             </p>
           </div>
         </div>
       )}
 
-      <div className="tblwrap card surftbl">
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Surface</th>
-              <th>Source</th>
-              <th>Risk</th>
-              <th className="num">Tests</th>
-              <th>Attacker-controlled</th>
-            </tr>
-          </thead>
-          <tbody>
-            {surfaces.map((s) => (
-              <tr key={s.id} data-off={!s.userControlled || undefined}>
-                <td>
-                  <div className="surfrow__path mono">{s.path}</div>
-                  <div className="surfrow__note">{s.note}</div>
-                </td>
-                <td className="dim">{KIND_WORD[s.kind]}</td>
-                <td><RiskDot risk={s.risk} withLabel /></td>
-                <td className="num mono">{s.userControlled ? s.tests : 0}</td>
-                <td>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={s.userControlled}
-                      onChange={() =>
-                        setSurfaces((xs) =>
-                          xs.map((x) =>
-                            x.id === s.id ? { ...x, userControlled: !x.userControlled } : x,
-                          ),
-                        )
-                      }
-                    />
-                    <span>{s.userControlled ? "yes" : "no — skip"}</span>
-                  </label>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="sgroups">
+        {SURFACE_GROUPS.map((g) => {
+          const rows = surfaces.filter((s) => s.kind === g.kind);
+          if (!rows.length) return null;
+          return (
+            <section className="sgroup" key={g.kind}>
+              <header className="sgroup__head">
+                <h2 className="sgroup__h">{g.title}</h2>
+                <p className="sgroup__n">{g.note}</p>
+              </header>
+              <ul className="sgroup__list">
+                {rows.map((s) => {
+                  const dead = s.risk === "none";
+                  return (
+                    <li key={s.id}>
+                      <label className="splace" data-off={!s.userControlled || dead || undefined}>
+                        <input
+                          type="checkbox"
+                          checked={s.userControlled && !dead}
+                          disabled={dead}
+                          onChange={() => toggle(s.id)}
+                        />
+                        <span className="splace__body">
+                          <span className="splace__title mono">{surfaceTitle(s)}</span>
+                          <span className="splace__why">{s.note}</span>
+                        </span>
+                        <span className="splace__right">
+                          <span className="splace__risk" data-risk={s.risk}>
+                            {s.risk === "none" ? "safe" : `${s.risk} risk`}
+                          </span>
+                          <span className="splace__sub">{RISK_WHY[s.risk]}</span>
+                          <span className="splace__tests mono">
+                            {dead || !s.userControlled ? "not tested" : `${s.tests} attacks`}
+                          </span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          );
+        })}
       </div>
-
-      <section className="shapes">
-        <p className="eyebrow">how a parameter's risk is decided</p>
-        <div className="shapes__grid">
-          {SHAPES.map((s) => (
-            <div className="shapes__row" key={s.shape}>
-              <span className="mono">{s.shape}</span>
-              <RiskDot risk={s.risk} withLabel />
-              <span className="dim">{s.why}</span>
-            </div>
-          ))}
-        </div>
-      </section>
 
       <NextBar
         back={`/e/${ex.slug}/questions`}
         backLabel="Questions"
         next={`/e/${ex.slug}/config`}
-        nextLabel="Configure the scan"
-        note="Attacks are aimed at specific surfaces. That is the difference between a scan that finds real holes and one that finds none and means nothing."
+        nextLabel="Next"
       />
     </>
   );

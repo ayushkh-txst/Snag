@@ -96,30 +96,16 @@ export function BreakDetail() {
           <div className="fpbox" data-on={fp || undefined}>
             <p className="label">is this real?</p>
             <p className="fpbox__b">
-              Checkers are text searches, and text searches over-match. If this is the
-              model doing the right thing and the checker misreading it, say so — it comes
-              out of the count and feeds back into how the checker is tuned.
+              Checkers are text searches, and text searches over-match. If the model did
+              the right thing here and the checker misread it, say so.
             </p>
             <label className="check">
               <input type="checkbox" checked={fp} onChange={(e) => setFp(e.target.checked)} />
               <span>
-                <strong>Mark as a false positive.</strong> Excluded from the break rate and
-                from every future rescan.
+                <strong>Not a real break.</strong> Comes out of the rate, and out of every
+                rescan.
               </span>
             </label>
-          </div>
-
-          <div className="reprobox">
-            <p className="label">reproduce it</p>
-            <p className="fpbox__b">
-              Same prompt, same config, same technique set produces the same attacks.
-              Randomness lives in the model's responses, never in what gets tested.
-            </p>
-            <pre className="checkout__pre mono">{`snag replay \\
-  --project ${ex.slug} \\
-  --technique ${b.techniqueId} \\
-  --surface ${surface?.path ?? "chat"} \\
-  --repeats ${b.repeats}`}</pre>
           </div>
 
           <nav className="bd__near">

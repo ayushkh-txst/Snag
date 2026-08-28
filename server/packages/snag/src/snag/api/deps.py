@@ -107,3 +107,16 @@ async def require_slug(request: Request, slug: str) -> asyncpg.Record:
     if row is None:
         raise HTTPException(status_code=404, detail=f"no such project: {slug}")
     return row
+
+
+async def require_mutable_slug(request: Request, slug: str) -> asyncpg.Record:
+    """Like `require_slug`, but 403s for a seeded example (T-15-01): the six
+    01-15 examples are read-only fixtures served with no key, and must
+    reject any mutation (delete, rule/surface edits, a new scan, applying a
+    fix) — never a client's own state, since anonymous mutation of a shared,
+    key-free example is a tampering and cost-abuse vector, not a per-user
+    workspace edit."""
+    row = await require_slug(request, slug)
+    if row["seeded"]:
+        raise HTTPException(status_code=403, detail="seeded example projects are read-only")
+    return row

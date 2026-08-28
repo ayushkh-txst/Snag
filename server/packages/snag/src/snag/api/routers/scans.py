@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from snag.api.app import ctx
-from snag.api.deps import require_funding, require_slug, validate_model
+from snag.api.deps import require_funding, require_mutable_slug, require_slug, validate_model
 from snag.api.ratelimit import guard_owner_scans
 from snag.api.sse import scan_event_stream
 from snag.cost import estimate_scan_cost
@@ -144,7 +144,7 @@ async def create_scan(
     _funded: None = Depends(require_funding),
     _rate_limited: None = Depends(guard_owner_scans),
 ) -> StartScanResponse:
-    project = await require_slug(request, body.slug)
+    project = await require_mutable_slug(request, body.slug)  # T-15-01
     state = ctx(request)
 
     model = body.model or project["model"]

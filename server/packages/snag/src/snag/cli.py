@@ -38,6 +38,34 @@ def work(
     typer.echo(f"processed={stats.processed} failed={stats.failed}")
 
 
+@app.command("seed")
+def seed() -> None:
+    """Idempotently seed the six example projects (01-15) at their fixed
+    slugs, running each through the real pipeline with the owner's
+    OpenRouter key. Safe to run on every deploy: a slug that's already
+    seeded is skipped, at zero additional spend (T-15-02)."""
+    from snag.seed import seed_examples
+    from substrate.db import Database
+    from substrate.llm.factory import build_completions
+
+    async def main() -> list[str]:
+        settings = get_settings()
+        async with Database.open(settings.database_url) as db:
+            completions = build_completions(
+                provider=settings.llm_provider, api_key=settings.openrouter_api_key
+            )
+            return await seed_examples(db, completions)
+
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    new_run_id()
+    seeded = asyncio.run(main())
+    if seeded:
+        typer.echo(f"seeded: {', '.join(seeded)}")
+    else:
+        typer.echo("seeded: none (all six already present)")
+
+
 @app.command("queue-stats")
 def queue_stats() -> None:
     """Show the scan queue's state."""

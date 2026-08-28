@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_slug, validate_model
+from snag.api.deps import get_completions, require_mutable_slug, require_slug, validate_model
 from snag.config import get_settings
 from snag.extract import extract_rules
 from substrate.llm import Completions
@@ -271,7 +271,7 @@ async def delete_project(slug: str, request: Request) -> Response:
     prompt version, rule, question, surface, scan, attack_run, gap, and fix
     under this project id goes with it. No per-table cleanup to keep in sync
     (and forget) as new child tables are added."""
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01: a seeded example is never deletable
     state = ctx(request)
     async with state.db.acquire() as conn:
         await conn.execute("DELETE FROM projects WHERE id = $1", slug)
@@ -293,7 +293,7 @@ async def create_rule(slug: str, body: RuleCreateRequest, request: Request) -> d
     """EXTRACT-03: a rule the user typed in — always `in_prompt = false`
     (it wasn't in the pasted prompt by definition) and `confirmed_by_user =
     true` (adding it IS confirming it)."""
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01
     state = ctx(request)
     async with state.db.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
@@ -327,7 +327,7 @@ async def update_rule(
     `model_dump(exclude_unset=True)` comes from `RulePatchRequest`'s own
     (fixed, `extra="forbid"`) field set, so there is no way for a request
     body to name a column outside that list."""
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="no fields to update")
@@ -364,7 +364,7 @@ async def update_rule(
 
 @router.delete("/projects/{slug}/rules/{rule_id}", status_code=204)
 async def delete_rule(slug: str, rule_id: int, request: Request) -> Response:
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01
     state = ctx(request)
     async with state.db.acquire() as conn:
         deleted = await conn.fetchval(

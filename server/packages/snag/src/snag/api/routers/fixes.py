@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_funding, require_slug
+from snag.api.deps import get_completions, require_funding, require_mutable_slug, require_slug
 from snag.api.ratelimit import guard_owner_scans
 from snag.fixes import apply_and_verify, ensure_fixes_proposed
 from substrate.llm import Completions
@@ -50,8 +50,6 @@ def _fix_out(row: Any) -> dict[str, Any]:
 async def get_fixes(
     slug: str,
     request: Request,
-    _funded: None = Depends(require_funding),
-    _rate_limited: None = Depends(guard_owner_scans),
     completions: Completions = Depends(get_completions),  # noqa: B008 - FastAPI DI idiom
 ) -> list[dict[str, Any]]:
     """Reading this endpoint may itself dispatch a (funded, rate-limited)
@@ -59,8 +57,16 @@ async def get_fixes(
     (`ensure_fixes_proposed`) — hence the same `require_funding`/
     `guard_owner_scans` guards `POST /scans` uses, even though this is a
     GET. A rule already covered for the latest scan costs nothing on a
-    repeat call."""
-    await require_slug(request, slug)
+    repeat call.
+
+    A seeded example (01-15, EXAMPLE-01) is exempt from both guards: its
+    fixes were all proposed once at seed time, so a read never actually
+    dispatches a model call — gating it on funding would 402 a key-free
+    reader for a call that was never going to happen."""
+    project = await require_slug(request, slug)
+    if not project["seeded"]:
+        require_funding(request)
+        guard_owner_scans(request)
     state = ctx(request)
     rows = await ensure_fixes_proposed(state.db, slug, completions=completions)
     return [_fix_out(r) for r in rows]
@@ -81,7 +87,7 @@ async def apply_fix(
     _rate_limited: None = Depends(guard_owner_scans),
     completions: Completions = Depends(get_completions),  # noqa: B008 - FastAPI DI idiom
 ) -> ApplyFixResponse:
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01: a seeded example's fixes are never applied
     state = ctx(request)
     db_id = _parse_fix_id(fix_id)
     if db_id is None:

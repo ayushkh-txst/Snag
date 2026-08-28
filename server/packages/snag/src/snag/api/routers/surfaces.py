@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
-from snag.api.deps import require_slug
+from snag.api.deps import require_mutable_slug, require_slug
 from snag.surfaces import build_surface_map
 
 log = structlog.get_logger(__name__)
@@ -74,7 +74,7 @@ async def _latest_prompt_version(
 
 @router.post("/projects/{slug}/surfaces")
 async def generate_surfaces(slug: str, request: Request) -> SurfacesResponse:
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01
     state = ctx(request)
 
     async with state.db.acquire() as conn:
@@ -124,7 +124,7 @@ async def get_surfaces(slug: str, request: Request) -> SurfacesResponse:
 async def patch_surface(
     slug: str, surface_id: int, body: PatchSurfaceRequest, request: Request
 ) -> dict[str, Any]:
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01
     state = ctx(request)
 
     values: dict[str, Any] = {

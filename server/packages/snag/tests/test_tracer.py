@@ -60,7 +60,9 @@ async def _create_project(client: httpx.AsyncClient, fake: FakeCompletions) -> s
     fake.responses.append(_extraction_response())
     res = await client.post(
         "/api/projects",
-        json={"system_prompt": SYSTEM_PROMPT, "model": "openai/gpt-4o-mini"},
+        # KEY-03: the request's `model` must be in ACCEPTED_MODELS
+        # (server/.env) or POST /projects 400s before ever extracting.
+        json={"system_prompt": SYSTEM_PROMPT, "model": "qwen/qwen3.8-flash"},
     )
     assert res.status_code == 200, res.text
     return str(res.json()["slug"])

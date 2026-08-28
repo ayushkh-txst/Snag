@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_funding, require_slug
+from snag.api.deps import get_completions, require_funding, require_slug, validate_model
 from snag.api.ratelimit import guard_owner_scans
 from substrate.llm import CompletionRequest, Completions, Message, Role
 
@@ -134,6 +134,10 @@ async def start_scan(
 
     attack_text = _attack_prompt(rule["source_line"] or rule["text"])
     model = project["model"]
+    # KEY-03: revalidate before dispatch even though the project's model was
+    # already checked at creation — guards against ACCEPTED_MODELS changing
+    # between project creation and scan.
+    validate_model(model)
 
     # A CompletionError here propagates to snag.api.app's exception handler
     # (-> HTTP 502); a REFUSAL is a normal, successful response and falls

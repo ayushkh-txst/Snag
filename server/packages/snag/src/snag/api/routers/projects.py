@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_slug
+from snag.api.deps import get_completions, require_slug, validate_model
 from snag.config import get_settings
 from snag.extract import extract_rules
 from substrate.llm import Completions
@@ -48,6 +48,7 @@ async def create_project(
 ) -> CreateProjectResponse:
     settings = get_settings()
     model = body.model or settings.default_model
+    validate_model(model)  # KEY-03: before any completions/model call
 
     tools_obj = None
     if body.tools:

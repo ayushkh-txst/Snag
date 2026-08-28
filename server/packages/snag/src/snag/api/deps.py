@@ -18,6 +18,7 @@ import asyncpg
 from fastapi import HTTPException, Request
 
 from snag.api.app import ctx
+from snag.config import get_settings
 from substrate.llm import Completions
 from substrate.llm.factory import build_completions
 
@@ -84,6 +85,17 @@ def require_funding(request: Request) -> None:
                 "set X-OpenRouter-Key or configure an owner OPENROUTER_API_KEY"
             ),
         )
+
+
+def validate_model(model: str) -> None:
+    """KEY-03: reject any model string outside `ACCEPTED_MODELS` before any
+    `get_completions`/model call is made. A no-op whenever `accepted_models`
+    is unset/empty — no restriction, for local/dev flexibility. Called at
+    the top of `POST /projects` and `POST /scans`, before either touches a
+    completions adapter."""
+    accepted = get_settings().accepted_models
+    if accepted and model not in accepted:
+        raise HTTPException(status_code=400, detail=f"model {model!r} is not in the accepted list")
 
 
 async def require_slug(request: Request, slug: str) -> asyncpg.Record:

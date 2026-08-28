@@ -56,7 +56,9 @@ async def test_report_matches_the_ui_example_shape_and_the_fixture_invariant(
     async with client_factory(fake) as client:
         create = await client.post(
             "/api/projects",
-            json={"system_prompt": SYSTEM_PROMPT, "model": "openai/gpt-4o-mini"},
+            # KEY-03: the request's `model` must be in ACCEPTED_MODELS
+            # (server/.env) or POST /projects 400s before ever extracting.
+            json={"system_prompt": SYSTEM_PROMPT, "model": "qwen/qwen3.8-flash"},
         )
         assert create.status_code == 200, create.text
         slug = create.json()["slug"]

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import ssl
 from functools import lru_cache
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -40,10 +41,43 @@ class Settings(BaseSettings):
     path only."""
 
     default_model: str = "qwen/qwen3.8-flash"
-    """Must be a member of ACCEPTED_MODELS (see PROJECT.md Constraints).
-    Full allowlist parsing/enforcement (accepted_models, validate_model(),
-    GET /api/models) is 01-02 Task 4 — this is only the default value fix
-    so the tracer's live call in 01-01 Task 4 targets an accepted model."""
+    """The final fallback when `accepted_models` is empty. Whenever
+    `accepted_models` is non-empty, `_default_model_must_be_accepted` below
+    forces this to a member of it — this hardcoded value only matters for
+    local/dev runs with no ACCEPTED_MODELS set at all."""
+
+    accepted_models: Annotated[list[str], NoDecode] = []
+    """KEY-03: only these OpenRouter models may ever be dispatched to when
+    non-empty (`snag.api.deps.validate_model` enforces this server-side;
+    `GET /api/models` is the frontend's live source for its model picker).
+    Unset/empty means no restriction — local/dev flexibility. Parsed from
+    the comma-separated `ACCEPTED_MODELS` env var by the validator below.
+
+    `NoDecode` opts this field out of pydantic-settings' default complex-
+    field handling, which tries to `json.loads` a list-typed env value
+    before any validator runs — and a plain `a,b,c` string isn't JSON, so
+    it would raise `SettingsError` before `_split_accepted_models` ever saw
+    it."""
+
+    @field_validator("accepted_models", mode="before")
+    @classmethod
+    def _split_accepted_models(cls, value: Any) -> Any:
+        """`ACCEPTED_MODELS=a,b,c` arrives as one comma-separated string
+        from the environment; split it here since `NoDecode` (above) turns
+        off pydantic-settings' own (JSON-only) complex-field parsing."""
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @model_validator(mode="after")
+    def _default_model_must_be_accepted(self) -> Settings:
+        """KEY-03: the default model must never be a value `validate_model`
+        would itself reject. Falls back to `accepted_models[0]` rather than
+        raising, so a stale `DEFAULT_MODEL` env var can't crash startup —
+        the allowlist wins the disagreement silently and predictably."""
+        if self.accepted_models and self.default_model not in self.accepted_models:
+            self.default_model = self.accepted_models[0]
+        return self
 
     @property
     def sqlalchemy_url(self) -> str:

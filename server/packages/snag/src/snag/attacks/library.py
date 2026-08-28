@@ -369,3 +369,9 @@ TECHNIQUES: tuple[Technique, ...] = (
     _AUTH_CONFUSION,
     _REFUSAL_BYPASS,
 )
+
+# A `Technique` only carries its own `id` on `Attack.technique_id`
+# (instantiate.py's `_build_attack`) — this lookup is how a caller that only
+# has an `Attack` (the runner, poisoning an indirect-surface tool result)
+# gets back the full `Technique` (canary, family) it came from.
+TECHNIQUE_BY_ID: dict[str, Technique] = {t.id: t for t in TECHNIQUES}

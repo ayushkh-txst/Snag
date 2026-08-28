@@ -9,6 +9,7 @@ from __future__ import annotations
 from snag.attacks.instantiate import Attack, Rule, Surface, instantiate
 from snag.attacks.library import (
     FAMILIES,
+    TECHNIQUE_BY_ID,
     TECHNIQUES,
     Direction,
     RuleCategory,
@@ -20,6 +21,7 @@ from snag.attacks.seed_techniques import seed_techniques
 
 __all__ = [
     "FAMILIES",
+    "TECHNIQUE_BY_ID",
     "TECHNIQUES",
     "Attack",
     "Direction",

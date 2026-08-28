@@ -189,12 +189,24 @@ export function NextBar({
   next,
   nextLabel,
   note,
+  onNext,
+  nextDisabled,
+  nextBusy,
 }: {
   back?: string;
   backLabel?: string;
   next?: string;
   nextLabel?: string;
   note?: string;
+  /**
+   * 01-17: an async action to run instead of a plain nav link (ScanConfig's
+   * "Start the scan" has to call `startScan` and navigate with the
+   * returned scan id, not just link to a fixed path). Takes precedence
+   * over `next` when both are given.
+   */
+  onNext?: () => void;
+  nextDisabled?: boolean;
+  nextBusy?: boolean;
 }) {
   return (
     <div className="nextbar">
@@ -207,10 +219,21 @@ export function NextBar({
       </div>
       {note && <p className="nextbar__note dim">{note}</p>}
       <div className="nextbar__r">
-        {next && (
-          <Link to={next} className="btn" data-variant="solid">
-            {nextLabel} <span aria-hidden="true">→</span>
-          </Link>
+        {onNext ? (
+          <button
+            className="btn"
+            data-variant="solid"
+            disabled={nextDisabled}
+            onClick={onNext}
+          >
+            {nextBusy ? "Starting…" : nextLabel} <span aria-hidden="true">→</span>
+          </button>
+        ) : (
+          next && (
+            <Link to={next} className="btn" data-variant="solid">
+              {nextLabel} <span aria-hidden="true">→</span>
+            </Link>
+          )
         )}
       </div>
     </div>

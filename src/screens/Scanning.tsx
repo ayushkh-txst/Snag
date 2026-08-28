@@ -1,79 +1,103 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
 import { Arrow } from "../components/ui";
-import { byslug } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+import { useScanStream } from "../hooks/useScanStream";
+import { estimateScan, getScan, type ScanMode, type ScanRecord } from "../api/client";
 
-type Event = {
-  ruleIdx: number;
-  surfIdx: number;
-  ruleId: string;
-  surface: string;
-  technique: string;
-  broke: boolean;
-};
+const LAST_SCAN_KEY = (slug: string) => `snag:lastScan:${slug}`;
 
-const FAMILIES = [
-  "instruction_override", "roleplay", "encoding", "context_switch", "authority_claim",
-  "translation", "debug_pretext", "continuation", "payload_splitting", "obfuscation",
-];
-
-/** Deterministic — same prompt, same config, same attacks. Never Math.random(). */
-function buildQueue(rules: { id: string; testable: boolean; attacks: number; breaks: number }[], surfaces: { id: string; path: string; userControlled: boolean }[]): Event[] {
-  const active = surfaces.filter((s) => s.userControlled);
-  const out: Event[] = [];
-  rules.filter((r) => r.testable).forEach((r, ri) => {
-    const n = Math.max(6, Math.round(r.attacks / 3));
-    let left = r.breaks;
-    for (let i = 0; i < n; i++) {
-      const si = (ri * 3 + i * 5) % active.length;
-      const broke = left > 0 && (i * 7 + ri) % 5 === 0;
-      if (broke) left -= 1;
-      out.push({
-        ruleIdx: ri,
-        surfIdx: si,
-        ruleId: r.id,
-        surface: active[si]?.path ?? "user message",
-        technique: `${FAMILIES[(ri * 3 + i) % FAMILIES.length]}.${String((i * 13 + ri) % 40).padStart(2, "0")}`,
-        broke,
-      });
-    }
-  });
-  return out;
+function readInitialScanId(slug: string | undefined, stateScanId: unknown): number | null {
+  if (typeof stateScanId === "number") return stateScanId;
+  if (!slug) return null;
+  try {
+    const stored = localStorage.getItem(LAST_SCAN_KEY(slug));
+    return stored ? Number(stored) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function Scanning() {
   const { slug } = useParams();
-  const ex = byslug(slug);
-  const testable = useMemo(() => ex.rules.filter((r) => r.testable), [ex]);
-  const activeSurfaces = useMemo(() => ex.surfaces.filter((s) => s.userControlled), [ex]);
-  const queue = useMemo(() => buildQueue(ex.rules, ex.surfaces), [ex]);
+  const location = useLocation();
+  const { data: ex, loading, error, notFound } = useProject(slug);
 
-  const [i, setI] = useState(0);
-  const [running, setRunning] = useState(true);
-  const logRef = useRef<HTMLDivElement>(null);
+  const [scanId] = useState<number | null>(() =>
+    readInitialScanId(slug, (location.state as { scanId?: number } | null)?.scanId),
+  );
+  const [scan, setScan] = useState<ScanRecord | null>(null);
+  const [estimatedCalls, setEstimatedCalls] = useState<number | null>(null);
+
+  // PROGRESS-01: the real SSE client (`GET /api/scans/{id}/stream`),
+  // replacing the old setTimeout-driven fake queue entirely. A mid-scan
+  // refresh re-mounts this screen, re-reads `scanId` from localStorage
+  // (above) and reconnects from wherever the stream's own `since_seq`
+  // cursor resumes — nothing is replayed or lost.
+  const stream = useScanStream(scanId);
 
   useEffect(() => {
-    if (!running || i >= queue.length) return;
-    const t = window.setTimeout(() => setI((n) => Math.min(n + 1, queue.length)), 46);
-    return () => window.clearTimeout(t);
-  }, [i, running, queue.length]);
+    if (scanId == null || !slug) return;
+    let cancelled = false;
+    getScan(scanId)
+      .then((record) => {
+        if (cancelled) return;
+        setScan(record);
+        return estimateScan(slug, {
+          mode: record.mode as ScanMode,
+          surfaces: record.surfaces,
+          repeats: record.repeats,
+          model: record.models[0],
+        });
+      })
+      .then((est) => {
+        if (cancelled || !est) return;
+        setEstimatedCalls(est.estimatedCalls);
+      })
+      .catch(() => {
+        // scan meta/estimate are progress-bar denominators, not the
+        // source of truth (the SSE events are) — degrade quietly.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scanId, slug]);
 
-  const done = i >= queue.length;
-  const seen = queue.slice(0, i);
-  const breaks = seen.filter((e) => e.broke).length;
-  const pct = queue.length ? (i / queue.length) * 100 : 0;
-  const calls = Math.round((i / queue.length) * ex.scan.calls) || 0;
-  const cost = (ex.scan.cost * (i / (queue.length || 1)));
+  const testable = useMemo(() => ex?.rules.filter((r) => r.testable) ?? [], [ex]);
+  const activeSurfaces = useMemo(() => ex?.surfaces.filter((s) => s.userControlled) ?? [], [ex]);
 
-  const cellState = (ri: number, si: number) => {
-    const rel = queue.filter((e) => e.ruleIdx === ri && e.surfIdx === si);
-    if (!rel.length) return "none";
-    const seenRel = seen.filter((e) => e.ruleIdx === ri && e.surfIdx === si);
-    if (!seenRel.length) return "ahead";
-    if (seenRel.some((e) => e.broke)) return "snagged";
-    if (seenRel.length === rel.length) return "held";
+  if (loading) return <Loading label="Loading…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading…" />;
+
+  if (scanId == null) {
+    return (
+      <section className="panel" data-state="notfound">
+        <p>No scan in progress for this project.</p>
+        <Link className="btn" data-variant="ghost" to={`/e/${ex.slug}/config`}>
+          Configure a scan <Arrow />
+        </Link>
+      </section>
+    );
+  }
+
+  const done = stream.status === "done";
+  const events = stream.events;
+  const pct = estimatedCalls ? Math.min(100, (stream.attacksDone / estimatedCalls) * 100) : 0;
+  const breaksPct = estimatedCalls
+    ? Math.min(100, (stream.breaksFound / estimatedCalls) * 100)
+    : 0;
+
+  const cellState = (ruleId: string, surfaceId: string) => {
+    const rel = events.filter((e) => e.ruleId === ruleId && e.surfaceId === surfaceId);
+    if (rel.length === 0) return "ahead";
+    if (rel.some((e) => e.broke)) return "snagged";
     return "running";
   };
+
+  const recent = events.slice(-11).reverse();
 
   return (
     <>
@@ -81,26 +105,24 @@ export function Scanning() {
         <div>
           <p className="eyebrow">step 05 — scanning</p>
           <h1 className="scanhead__h">
-            {done ? "Scan complete." : "Running."}
+            {done
+              ? stream.doneStatus === "failed"
+                ? "Scan failed."
+                : stream.doneStatus === "stopped_at_cap"
+                  ? "Stopped at the cap."
+                  : "Scan complete."
+              : "Running."}
           </h1>
           <p className="scanhead__sub mono">
-            {ex.model} · {ex.scan.mode} · {ex.scan.repeats} repeats · {activeSurfaces.length} surfaces
+            {(scan?.models[0] ?? ex.model)} · {scan?.mode ?? "…"} · {scan?.repeats ?? "…"} repeats
+            · {activeSurfaces.length} surfaces
           </p>
         </div>
         <div className="scanhead__acts">
-          {done ? (
+          {done && (
             <Link className="btn" data-variant="solid" to={`/e/${ex.slug}/report`}>
               Open the report <Arrow />
             </Link>
-          ) : (
-            <>
-              <button className="btn" data-variant="ghost" onClick={() => setRunning((r) => !r)}>
-                {running ? "Pause" : "Resume"}
-              </button>
-              <button className="btn" data-variant="quiet" onClick={() => setI(queue.length)}>
-                Cancel and keep what's done
-              </button>
-            </>
           )}
         </div>
       </header>
@@ -108,14 +130,21 @@ export function Scanning() {
       <div className="prog">
         <div className="prog__bar">
           <span className="prog__fill" style={{ width: `${pct}%` }} />
-          <span className="prog__breaks" style={{ width: `${(breaks / (queue.length || 1)) * 100}%` }} />
+          <span className="prog__breaks" style={{ width: `${breaksPct}%` }} />
         </div>
         <div className="statrow prog__stats">
-          <div className="stat"><div className="stat__n">{i}<span className="stat__unit">/ {queue.length}</span></div><div className="stat__label">attacks run</div></div>
-          <div className="stat" data-tone="snagged"><div className="stat__n">{breaks}</div><div className="stat__label">breaks found</div></div>
-          <div className="stat"><div className="stat__n">{calls.toLocaleString()}</div><div className="stat__label">model calls</div></div>
-          <div className="stat"><div className="stat__n">${cost.toFixed(2)}</div><div className="stat__label">spent so far</div></div>
-          <div className="stat"><div className="stat__n">$3.00</div><div className="stat__label">hard cap</div></div>
+          <div className="stat">
+            <div className="stat__n">
+              {stream.attacksDone}
+              <span className="stat__unit">
+                {estimatedCalls ? ` / ~${estimatedCalls}` : ""}
+              </span>
+            </div>
+            <div className="stat__label">attacks run</div>
+          </div>
+          <div className="stat" data-tone="snagged"><div className="stat__n">{stream.breaksFound}</div><div className="stat__label">breaks found</div></div>
+          <div className="stat"><div className="stat__n">${stream.cost.toFixed(2)}</div><div className="stat__label">spent so far</div></div>
+          <div className="stat"><div className="stat__n">${(scan?.spendCap ?? 0).toFixed(2)}</div><div className="stat__label">hard cap</div></div>
         </div>
       </div>
 
@@ -123,10 +152,9 @@ export function Scanning() {
         <div className="matrix__head">
           <span className="label">rule × surface</span>
           <div className="matrix__key">
-            <span data-k="held">held</span>
-            <span data-k="snagged">snagged</span>
-            <span data-k="running">running</span>
-            <span data-k="ahead">queued</span>
+            <span data-k="snagged">broke</span>
+            <span data-k="running">held so far</span>
+            <span data-k="ahead">not yet attacked</span>
           </div>
         </div>
         <div className="matrix__scroll">
@@ -140,14 +168,13 @@ export function Scanning() {
                 <span>{s.path.length > 26 ? `${s.path.slice(0, 25)}…` : s.path}</span>
               </div>
             ))}
-            {testable.map((r, ri) => (
+            {testable.map((r) => (
               <div className="matrix__rowgroup" key={r.id} style={{ display: "contents" }}>
                 <div className="matrix__rowlabel">
-                  <span className="mono dimmer">{String(ri + 1).padStart(2, "0")}</span>
                   <span>{r.text}</span>
                 </div>
-                {activeSurfaces.map((s, si) => (
-                  <div key={s.id} className="matrix__cell" data-state={cellState(ri, si)} />
+                {activeSurfaces.map((s) => (
+                  <div key={s.id} className="matrix__cell" data-state={cellState(r.id, s.id)} />
                 ))}
               </div>
             ))}
@@ -158,27 +185,31 @@ export function Scanning() {
       <section className="log">
         <div className="log__head">
           <span className="label">attack log</span>
-          <span className="mono dimmer">{done ? "finished" : running ? "live" : "paused"}</span>
+          <span className="mono dimmer">{done ? "finished" : "live"}</span>
         </div>
-        <div className="log__body" ref={logRef}>
-          {seen.slice(-11).reverse().map((e, k) => (
-            <div className="log__row" key={`${i}-${k}`} data-broke={e.broke || undefined}>
-              <span className="mono log__rule">rule {String(e.ruleIdx + 1).padStart(2, "0")}</span>
-              <span className="mono log__surf">{e.surface}</span>
-              <span className="mono log__tech">{e.technique}</span>
-              <span className="mono log__res">{e.broke ? "broke" : "held"}</span>
-            </div>
-          ))}
-          {seen.length === 0 && <div className="log__row dim">Queuing attacks…</div>}
+        <div className="log__body">
+          {recent.map((e) => {
+            const rule = ex.rules.find((r) => r.id === e.ruleId);
+            const surface = ex.surfaces.find((s) => s.id === e.surfaceId);
+            return (
+              <div className="log__row" key={e.seq} data-broke={e.broke || undefined}>
+                <span className="mono log__rule">{rule ? rule.text.slice(0, 28) : `rule ${e.ruleId}`}</span>
+                <span className="mono log__surf">{surface?.path ?? "user message"}</span>
+                <span className="mono log__tech">{e.techniqueId}</span>
+                <span className="mono log__res">{e.broke ? "broke" : "held"}</span>
+              </div>
+            );
+          })}
+          {recent.length === 0 && <div className="log__row dim">Queuing attacks…</div>}
         </div>
       </section>
 
       {done && (
         <div className="scandone">
           <p>
-            {breaks === 0
+            {stream.breaksFound === 0
               ? "Nothing broke. That result is only as good as the coverage statement at the top of the report — read that first."
-              : `${breaks} breaks across ${new Set(seen.filter((e) => e.broke).map((e) => e.ruleId)).size} rules. Every one has a full transcript.`}
+              : `${stream.breaksFound} breaks found. Every one has a full transcript.`}
           </p>
           <Link className="btn" data-variant="solid" to={`/e/${ex.slug}/report`}>
             Open the report <Arrow />

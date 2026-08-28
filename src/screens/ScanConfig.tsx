@@ -1,7 +1,10 @@
-import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { estimateScan, startScan, type ScanMode } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
-import { SCAN_MODES, byslug } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+import { SCAN_MODES } from "../data";
 
 const SURFACE_OPTS = [
   { id: "direct", label: "Direct injection", note: "The attack is in the user's own message." },
@@ -10,21 +13,73 @@ const SURFACE_OPTS = [
   { id: "indirect", label: "Indirect injection", note: "Hidden in what the agent reads. Also covers empty, malformed and contradictory tool output." },
 ];
 
+const LAST_SCAN_KEY = (slug: string) => `snag:lastScan:${slug}`;
+
 export function ScanConfig() {
   const { slug } = useParams();
-  const ex = byslug(slug);
+  const nav = useNavigate();
+  const { data: ex, loading, error, notFound } = useProject(slug);
   const [mode, setMode] = useState("standard");
   const [repeats, setRepeats] = useState(3);
   const [on, setOn] = useState<string[]>(["direct", "tool"]);
   const [callCap, setCallCap] = useState(1500);
   const [spendCap, setSpendCap] = useState(3);
+  const [estimate, setEstimate] = useState<{ calls: number; cost: number } | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   const perSurface = 96;
-  const estCalls = useMemo(() => on.length * perSurface * repeats * 0.42, [on, repeats]);
-  const estCost = estCalls * 0.0013;
+  const roughCalls = useMemo(() => on.length * perSurface * repeats * 0.42, [on, repeats]);
+  const roughCost = roughCalls * 0.0013;
+
+  useEffect(() => {
+    if (!slug) return;
+    let cancelled = false;
+    const apiMode: ScanMode = (mode || "custom") as ScanMode;
+    estimateScan(slug, { mode: apiMode, surfaces: on, repeats })
+      .then((r) => {
+        if (cancelled) return;
+        setEstimate({ calls: r.estimatedCalls, cost: r.estimatedCostUsd });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setEstimate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, mode, on, repeats]);
+
+  if (loading) return <Loading label="Loading scan config…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading scan config…" />;
 
   const toggle = (id: string) =>
     setOn((xs) => (xs.includes(id) ? xs.filter((x) => x !== id) : [...xs, id]));
+
+  const handleStart = () => {
+    if (!slug || starting) return;
+    setStarting(true);
+    setStartError(null);
+    const apiMode: ScanMode = (mode || "custom") as ScanMode;
+    startScan(slug, { mode: apiMode, surfaces: on, repeats, callCap, spendCap })
+      .then((result) => {
+        try {
+          localStorage.setItem(LAST_SCAN_KEY(slug), String(result.scanId));
+        } catch {
+          // private mode — Scanning.tsx falls back to router state only
+        }
+        nav(`/e/${slug}/scanning`, { state: { scanId: result.scanId } });
+      })
+      .catch(() => {
+        setStartError("Couldn't start the scan. Check your key and budget, then try again.");
+        setStarting(false);
+      });
+  };
+
+  const displayCalls = estimate ? estimate.calls : Math.round(roughCalls);
+  const displayCost = estimate ? estimate.cost : roughCost;
 
   return (
     <>
@@ -126,26 +181,29 @@ export function ScanConfig() {
           <div className="budget__est">
             <div className="budget__estrow">
               <span>Estimated calls</span>
-              <strong className="mono">{Math.round(estCalls).toLocaleString()}</strong>
+              <strong className="mono">{displayCalls.toLocaleString()}</strong>
             </div>
             <div className="budget__estrow">
               <span>Estimated spend</span>
-              <strong className="mono">${estCost.toFixed(2)}</strong>
+              <strong className="mono">${displayCost.toFixed(2)}</strong>
             </div>
             <div className="budget__estrow dim">
               <span>Model</span>
               <span className="mono">{ex.model}</span>
             </div>
           </div>
-          <p className="budget__note dim">Estimates. The running total is shown live.</p>
+          <p className="budget__note dim">Live, from the server's own pricing lookup.</p>
         </aside>
       </div>
 
       <NextBar
         back={`/e/${ex.slug}/surfaces`}
         backLabel="Surfaces"
-        next={`/e/${ex.slug}/scanning`}
         nextLabel="Start the scan"
+        onNext={handleStart}
+        nextDisabled={starting}
+        nextBusy={starting}
+        note={startError ?? undefined}
       />
     </>
   );

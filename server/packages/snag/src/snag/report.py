@@ -35,8 +35,11 @@ from datetime import datetime
 from typing import Any, cast
 
 import asyncpg
+import structlog
 
 from substrate.db import Database
+
+log = structlog.get_logger(__name__)
 
 # A rule this plan's extractor marked untestable never gets a checker — this
 # is the one and only reason (`snag.extract` never records `checkerType ==
@@ -449,3 +452,48 @@ async def set_false_positive(db: Database, slug: str, break_id: str, value: bool
             anchor["surface_id"],
         )
     return True
+
+
+async def mark_report_served(db: Database, slug: str) -> None:
+    """PRIV-02: stamp the purge clock the first time — idempotent. A second
+    call for the same slug leaves the original timestamp untouched, so
+    re-viewing a report during the grace window (open a break, apply a fix,
+    rescan, view the report again) never resets or restarts the clock.
+    Callers decide WHEN this is safe to call (`aggregate_report` is the only
+    caller — see its own docstring/call site for the completed-scan gate);
+    this function itself only guards against overwriting an existing
+    timestamp."""
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE projects SET report_served_at = now() "
+            "WHERE id = $1 AND report_served_at IS NULL",
+            slug,
+        )
+
+
+async def purge_expired_ephemeral(db: Database, *, grace_seconds: int) -> list[str]:
+    """PRIV-02: hard-delete every ephemeral, non-seeded project whose
+    `report_served_at` clock (see `mark_report_served`) is older than
+    `grace_seconds` — a single parameterized DELETE relying on the same
+    `ON DELETE CASCADE` chain PRIV-01's `DELETE /projects/{slug}` already
+    uses, so rules/surfaces/scans/attack_runs all go with it. `seeded = false`
+    is structural in this WHERE clause, not a post-hoc filter: a seeded
+    example is never a match no matter what its `ephemeral`/
+    `report_served_at` columns happen to hold (T-18-01). A project with
+    `report_served_at` still NULL (never served, or served but not yet past
+    a completed scan) or within the grace window is left completely alone,
+    as is any non-ephemeral project regardless of any other column value.
+    Returns the deleted slugs, for logging/tests."""
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """DELETE FROM projects
+               WHERE ephemeral = true AND seeded = false
+                 AND report_served_at IS NOT NULL
+                 AND report_served_at < now() - ($1::int * INTERVAL '1 second')
+               RETURNING id""",
+            grace_seconds,
+        )
+    deleted = [row["id"] for row in rows]
+    if deleted:
+        log.info("ephemeral_projects.purged", count=len(deleted), slugs=deleted)
+    return deleted

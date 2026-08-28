@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     adds in `snag.api.deps.get_completions`; this plan wires the owner-key
     path only."""
 
+    ephemeral_grace_seconds: int = 1800
+    """PRIV-02: the window between an ephemeral project's completed-scan
+    report first being served (`snag.report.mark_report_served`) and
+    `snag.report.purge_expired_ephemeral` hard-deleting it. Long enough for
+    one real post-scan viewing session (open a few breaks, apply a fix,
+    rescan, export) before the "keep nothing" promise is enforced
+    automatically, with no client DELETE call required."""
+
     default_model: str = "qwen/qwen3.8-flash"
     """The final fallback when `accepted_models` is empty. Whenever
     `accepted_models` is non-empty, `_default_model_must_be_accepted` below

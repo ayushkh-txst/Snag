@@ -13,6 +13,7 @@ import httpx
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.instantiate import instantiate
+from snag.report import mark_report_served, purge_expired_ephemeral
 from snag.runner import _LEAK_CHECK_LANGUAGES
 from substrate.db import Database
 from substrate.llm import CompletionResponse, Completions, FakeCompletions, StopReason, TokenUsage
@@ -297,3 +298,129 @@ async def test_deleting_an_ephemeral_project_leaves_no_durable_trace_at_all(
         for table in CHILD_TABLES:
             count = await conn.fetchval(f"SELECT count(*) FROM {table} WHERE project_id = $1", slug)
             assert count == 0, f"{table} still has rows for a deleted ephemeral project"
+
+
+# ---------------------------------------------------------------------------
+# PRIV-02 gap closure (01-18): report_served_at purge clock primitives.
+# `mark_report_served`/`purge_expired_ephemeral` are exercised directly here
+# (no HTTP) — the endpoint/aggregate_report wiring that decides WHEN to call
+# them is covered separately, below.
+# ---------------------------------------------------------------------------
+
+async def test_mark_report_served_stamps_once_and_is_idempotent(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    async with client_factory(_fake_extraction()) as client:
+        slug = await _create_project(client, ephemeral=True)
+
+    await mark_report_served(clean_db, slug)
+    async with clean_db.acquire() as conn:
+        first_stamp = await conn.fetchval(
+            "SELECT report_served_at FROM projects WHERE id = $1", slug
+        )
+    assert first_stamp is not None
+
+    # A second call must not reset the clock (re-viewing a report during the
+    # grace window never restarts it).
+    await mark_report_served(clean_db, slug)
+    async with clean_db.acquire() as conn:
+        second_stamp = await conn.fetchval(
+            "SELECT report_served_at FROM projects WHERE id = $1", slug
+        )
+    assert second_stamp == first_stamp
+
+
+async def test_purge_expired_ephemeral_deletes_expired_project_and_all_child_rows(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    async with client_factory(_fake_extraction()) as client:
+        slug = await _create_project(client, ephemeral=True)
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE projects SET report_served_at = now() - INTERVAL '1 hour' WHERE id = $1",
+            slug,
+        )
+
+    deleted = await purge_expired_ephemeral(clean_db, grace_seconds=60)
+    assert slug in deleted
+
+    async with clean_db.acquire() as conn:
+        project_row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1", slug)
+        assert project_row is None
+        for table in ("rules", "surfaces", "scans"):
+            count = await conn.fetchval(f"SELECT count(*) FROM {table} WHERE project_id = $1", slug)
+            assert count == 0, f"{table} still has rows for a purged ephemeral project"
+        run_count = await conn.fetchval(
+            "SELECT count(*) FROM attack_runs ar "
+            "JOIN scans s ON s.id = ar.scan_id WHERE s.project_id = $1",
+            slug,
+        )
+        assert run_count == 0, "attack_runs still has rows for a purged ephemeral project"
+
+
+async def test_purge_expired_ephemeral_never_deletes_a_seeded_project(
+    clean_db: Database,
+) -> None:
+    """T-18-01: the seeded guard is structural — a seeded=true row is never
+    purged even when every OTHER purge condition (ephemeral, expired
+    report_served_at) is forced true on it directly via SQL."""
+    slug = "seeded-example-for-purge-test"
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO projects (id, name, model, ephemeral, seeded, report_served_at)
+               VALUES ($1, 'Seeded Example', 'qwen/qwen3.8-flash', true, true,
+                       now() - INTERVAL '1 hour')""",
+            slug,
+        )
+
+    deleted = await purge_expired_ephemeral(clean_db, grace_seconds=60)
+    assert slug not in deleted
+
+    async with clean_db.acquire() as conn:
+        project_row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1", slug)
+    assert project_row is not None
+
+
+async def test_purge_expired_ephemeral_leaves_within_grace_and_null_report_served_at_alone(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    async with client_factory(_fake_extraction()) as client:
+        never_served_slug = await _create_project(client, ephemeral=True)
+    async with client_factory(_fake_extraction()) as client:
+        recently_served_slug = await _create_project(client, ephemeral=True)
+
+    async with clean_db.acquire() as conn:
+        # never_served_slug: report_served_at left NULL by project creation.
+        await conn.execute(
+            "UPDATE projects SET report_served_at = now() WHERE id = $1", recently_served_slug
+        )
+
+    deleted = await purge_expired_ephemeral(clean_db, grace_seconds=1800)
+    assert never_served_slug not in deleted
+    assert recently_served_slug not in deleted
+
+    async with clean_db.acquire() as conn:
+        assert await conn.fetchrow("SELECT * FROM projects WHERE id = $1", never_served_slug)
+        assert await conn.fetchrow("SELECT * FROM projects WHERE id = $1", recently_served_slug)
+
+
+async def test_purge_expired_ephemeral_never_touches_a_non_ephemeral_project(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    async with client_factory(_fake_extraction()) as client:
+        slug = await _create_project(client, ephemeral=False)
+
+    async with clean_db.acquire() as conn:
+        # Force every other purge condition true — only `ephemeral = false`
+        # (the project's real, un-forced state) should be what saves it.
+        await conn.execute(
+            "UPDATE projects SET report_served_at = now() - INTERVAL '1 hour' WHERE id = $1",
+            slug,
+        )
+
+    deleted = await purge_expired_ephemeral(clean_db, grace_seconds=60)
+    assert slug not in deleted
+
+    async with clean_db.acquire() as conn:
+        assert await conn.fetchrow("SELECT * FROM projects WHERE id = $1", slug) is not None

@@ -2,9 +2,11 @@
 extracted rule set, and the one always-present "chat" surface. GET returns
 the bare project row.
 
-This module also owns the rules-editing surface added in 01-06 Task 2
-(EXTRACT-03: add / edit / delete / toggle-testable, all against
-`app.state.db` with parameterized SQL).
+This module also owns the rules-editing surface (EXTRACT-03: add / edit /
+delete / toggle-testable, all against `app.state.db` with parameterized SQL)
+and the two privacy primitives the paste screen promises (PRIV-01: permanent
+cascading delete; PRIV-02: ephemeral projects never get a durable copy of
+the pasted prompt).
 """
 
 from __future__ import annotations
@@ -64,6 +66,10 @@ class CreateProjectRequest(BaseModel):
     system_prompt: str = Field(min_length=1, max_length=MAX_SYSTEM_PROMPT_CHARS)
     tools: str | None = Field(default=None, max_length=MAX_TOOLS_CHARS)
     model: str | None = None
+    ephemeral: bool = False
+    """PRIV-02: when true, neither the system prompt nor the tool
+    definitions are ever written to `prompt_versions` (or `projects.
+    tools_json`) — see `create_project`'s ephemeral branch below."""
 
 
 class CreateProjectResponse(BaseModel):
@@ -181,7 +187,7 @@ async def create_project(
     if extraction.malformed:
         # EXTRACT-02/EXTRACT-03: a shaky extraction pass degrades to "zero
         # rules found" rather than a 500 — the user's type-your-own-rules
-        # safety net (added in 01-06 Task 2) is what makes this survivable.
+        # safety net (POST .../rules below) is what makes this survivable.
         log.warning("project.extraction_malformed", model=model)
 
     # Unguessable by construction (T-01-05) — 9 bytes -> 12 URL-safe base64
@@ -189,19 +195,32 @@ async def create_project(
     slug = secrets.token_urlsafe(9)
     state = ctx(request)
 
+    # PRIV-02: an ephemeral project never gets a durable copy of the pasted
+    # prompt or tool definitions. `tools_json` is withheld from the
+    # `projects` row and the `prompt_versions` row is skipped entirely — the
+    # single largest, most sensitive artifact (the proprietary system
+    # prompt) never touches disk for these projects. Rules/surfaces still
+    # persist so the Confirm step (§2 Step 5) keeps working across requests;
+    # DELETE /projects/{slug} (PRIV-01) is what a client calls once the
+    # report has been shown, clearing everything that remains.
+    stored_tools_obj = None if body.ephemeral else tools_obj
+
     async with state.db.acquire() as conn, conn.transaction():
         await conn.execute(
-            "INSERT INTO projects (id, model, tools_json) VALUES ($1, $2, $3)",
+            "INSERT INTO projects (id, model, tools_json, ephemeral) VALUES ($1, $2, $3, $4)",
             slug,
             model,
-            tools_obj,
+            stored_tools_obj,
+            body.ephemeral,
         )
-        await conn.execute(
-            "INSERT INTO prompt_versions (project_id, full_text, tools_json) VALUES ($1, $2, $3)",
-            slug,
-            body.system_prompt,
-            tools_obj,
-        )
+        if not body.ephemeral:
+            await conn.execute(
+                """INSERT INTO prompt_versions (project_id, full_text, tools_json)
+                   VALUES ($1, $2, $3)""",
+                slug,
+                body.system_prompt,
+                tools_obj,
+            )
         for rule in extraction.rules:
             await conn.execute(
                 """INSERT INTO rules
@@ -228,7 +247,7 @@ async def create_project(
             slug,
         )
 
-    log.info("project.created", slug=slug, rules=len(extraction.rules))
+    log.info("project.created", slug=slug, rules=len(extraction.rules), ephemeral=body.ephemeral)
     return CreateProjectResponse(slug=slug)
 
 
@@ -243,6 +262,21 @@ async def get_project(slug: str, request: Request) -> dict[str, object]:
         "seeded": row["seeded"],
         "createdAt": row["created_at"].isoformat(),
     }
+
+
+@router.delete("/projects/{slug}", status_code=204)
+async def delete_project(slug: str, request: Request) -> Response:
+    """PRIV-01: one parameterized DELETE, relying entirely on the `ON DELETE
+    CASCADE` foreign keys the schema migration already declares — every
+    prompt version, rule, question, surface, scan, attack_run, gap, and fix
+    under this project id goes with it. No per-table cleanup to keep in sync
+    (and forget) as new child tables are added."""
+    await require_slug(request, slug)
+    state = ctx(request)
+    async with state.db.acquire() as conn:
+        await conn.execute("DELETE FROM projects WHERE id = $1", slug)
+    log.info("project.deleted", slug=slug)
+    return Response(status_code=204)
 
 
 @router.get("/projects/{slug}/rules")

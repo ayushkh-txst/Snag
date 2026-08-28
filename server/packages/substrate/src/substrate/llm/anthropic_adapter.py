@@ -13,8 +13,11 @@ from substrate.llm import (
     CompletionError,
     CompletionRequest,
     CompletionResponse,
+    Role,
     StopReason,
     TokenUsage,
+    ToolCall,
+    ToolsNotSupportedError,
 )
 from substrate.llm.pricing import CostLedger, price_or_fallback
 from substrate.resilience import full_jitter_delay
@@ -31,7 +34,20 @@ _STOP_REASONS = {
     "end_turn": StopReason.END_TURN,
     "max_tokens": StopReason.MAX_TOKENS,
     "refusal": StopReason.REFUSAL,
+    "tool_use": StopReason.TOOL_USE,
 }
+
+# Same heuristic as the OpenRouter adapter (openrouter_adapter.py): the SDK
+# raises a plain `anthropic.APIError` for every 4xx, with no dedicated
+# exception for "this model doesn't support tools", so the capability signal
+# has to come from the error text. Only consulted when `request.tools` was
+# actually sent.
+_TOOLS_UNSUPPORTED_HINTS = ("tool", "function calling")
+
+
+def _looks_like_tools_unsupported(error_text: str) -> bool:
+    lowered = error_text.lower()
+    return any(hint in lowered for hint in _TOOLS_UNSUPPORTED_HINTS)
 
 
 class AnthropicCompletions:
@@ -82,6 +98,14 @@ class AnthropicCompletions:
                 # Non-retryable provider failure (auth, invalid request, ...).
                 # Still a provider outage, not a refusal and not a code bug:
                 # surface it as CompletionError so the API layer renders 502.
+                # Exception: a `tools` request rejected for lack of
+                # function-calling support gets its own typed error (mirrors
+                # OpenRouterCompletions.complete), so the runner can skip
+                # tool-surface tests for this one model (§1.3).
+                if request.tools and _looks_like_tools_unsupported(str(exc)):
+                    raise ToolsNotSupportedError(
+                        f"model {request.model} does not support tool calling: {exc}"
+                    ) from exc
                 raise CompletionError(
                     f"{type(exc).__name__} for model {request.model}: {exc}"
                 ) from exc
@@ -109,12 +133,14 @@ class AnthropicCompletions:
             "model": request.model,
             "max_tokens": request.max_tokens,
             "system": system,
-            "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
+            "messages": [_to_anthropic_message(m) for m in request.messages],
         }
         if request.json_schema is not None:
             kwargs["output_config"] = {
                 "format": {"type": "json_schema", "schema": request.json_schema}
             }
+        if request.tools:
+            kwargs["tools"] = [_to_anthropic_tool(t) for t in request.tools]
         return kwargs
 
     def _to_response(self, raw: Any, *, run_id: str, when: date, model: str) -> CompletionResponse:
@@ -124,8 +150,14 @@ class AnthropicCompletions:
         # content list can be empty, and `raw.content[0]` would raise
         # IndexError on what is a perfectly successful HTTP 200.
         text = ""
+        tool_calls: tuple[ToolCall, ...] = ()
         if stop is not StopReason.REFUSAL:
             text = "".join(b.text for b in raw.content if b.type == "text")
+            tool_calls = tuple(
+                ToolCall(id=b.id, name=b.name, arguments=_coerce_tool_arguments(b.input))
+                for b in raw.content
+                if b.type == "tool_use"
+            )
 
         usage = TokenUsage(
             input_tokens=raw.usage.input_tokens or 0,
@@ -164,4 +196,42 @@ class AnthropicCompletions:
             model=raw.model,
             refusal_category=category,
             cost_usd=cost,
+            tool_calls=tool_calls,
         )
+
+
+def _to_anthropic_message(m: Any) -> dict[str, Any]:
+    """Anthropic has no TOOL role — a tool result is a `user` turn carrying a
+    `tool_result` content block keyed by the id of the `tool_use` block it
+    answers."""
+    if m.role is Role.TOOL:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+            ],
+        }
+    return {"role": m.role.value, "content": m.content}
+
+
+def _to_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """`CompletionRequest.tools` is OpenAI-shaped (`{"type": "function",
+    "function": {"name", "description", "parameters"}}`) because that is the
+    wire format OpenRouter already speaks; Anthropic wants the function body
+    flattened to the top level with `parameters` renamed `input_schema`."""
+    function = tool.get("function", tool)
+    return {
+        "name": function["name"],
+        "description": function.get("description", ""),
+        "input_schema": function.get("parameters", {"type": "object", "properties": {}}),
+    }
+
+
+def _coerce_tool_arguments(value: Any) -> dict[str, Any]:
+    """Anthropic's SDK already parses `tool_use.input` into a dict — unlike
+    OpenRouter's raw JSON string (see `openrouter_adapter._parse_tool_arguments`)
+    — but a malformed/non-dict value is still wrapped rather than trusted,
+    same discipline as the OpenRouter side (T-05-01)."""
+    if isinstance(value, dict):
+        return value
+    return {"_raw": value}

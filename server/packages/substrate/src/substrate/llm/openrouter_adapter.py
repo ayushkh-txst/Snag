@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -20,6 +21,8 @@ from substrate.llm import (
     CompletionResponse,
     StopReason,
     TokenUsage,
+    ToolCall,
+    ToolsNotSupportedError,
 )
 from substrate.llm.pricing import CostLedger, price_or_fallback
 from substrate.resilience import full_jitter_delay
@@ -34,7 +37,21 @@ _STOP_REASONS = {
     "stop": StopReason.END_TURN,
     "length": StopReason.MAX_TOKENS,
     "content_filter": StopReason.REFUSAL,
+    "tool_calls": StopReason.TOOL_USE,
 }
+
+# Substring seen in OpenRouter's own error body when the upstream model/
+# endpoint doesn't support function calling at all (e.g. "No endpoints found
+# that support tool use", "does not support tools"). A heuristic on purpose —
+# OpenRouter proxies many upstream providers and does not have one stable
+# error code for this — but it only fires when `request.tools` was actually
+# sent, so it can't misfire on an unrelated 4xx.
+_TOOLS_UNSUPPORTED_HINTS = ("tool", "function calling")
+
+
+def _looks_like_tools_unsupported(error_text: str) -> bool:
+    lowered = error_text.lower()
+    return any(hint in lowered for hint in _TOOLS_UNSUPPORTED_HINTS)
 
 
 class OpenRouterCompletions:
@@ -97,6 +114,15 @@ class OpenRouterCompletions:
                 # Non-retryable provider failure (auth, invalid request, ...).
                 # Not a refusal and not a code bug: an outage/misconfiguration,
                 # surfaced as CompletionError so the API layer renders 502.
+                # Exception: a `tools` request rejected because the model has
+                # no function-calling support gets its own typed error, so
+                # the runner can skip tool-surface tests for this one model
+                # instead of aborting the whole scan (§1.3).
+                if request.tools and _looks_like_tools_unsupported(raw.text):
+                    raise ToolsNotSupportedError(
+                        f"model {request.model} does not support tool calling: "
+                        f"{raw.text[:200]}"
+                    )
                 raise CompletionError(
                     f"HTTP {raw.status_code} for model {request.model}: {raw.text[:200]}"
                 )
@@ -132,16 +158,30 @@ class OpenRouterCompletions:
                 f"Return only the JSON, no other text:\n{json.dumps(request.json_schema)}"
             )
 
-        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-        messages.extend({"role": m.role.value, "content": m.content} for m in request.messages)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        for m in request.messages:
+            entry: dict[str, Any] = {"role": m.role.value, "content": m.content}
+            # A TOOL-role message answers a prior tool call; OpenAI's wire
+            # format keys that answer to the call by id, not by position.
+            if m.tool_call_id is not None:
+                entry["tool_call_id"] = m.tool_call_id
+            if m.name is not None:
+                entry["name"] = m.name
+            messages.append(entry)
 
         body: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens,
             "messages": messages,
+            # Ask OpenRouter to report what it actually billed on this call,
+            # so `_to_response` can use a real figure instead of estimating
+            # from the static RATES table for arbitrary BYOK models.
+            "usage": {"include": True},
         }
         if response_format is not None:
             body["response_format"] = response_format
+        if request.tools:
+            body["tools"] = list(request.tools)
         return body
 
     def _to_response(
@@ -156,6 +196,8 @@ class OpenRouterCompletions:
         if stop is not StopReason.REFUSAL:
             text = choice.get("message", {}).get("content") or ""
 
+        tool_calls = _parse_tool_calls(choice.get("message", {}).get("tool_calls"))
+
         raw_usage = raw.get("usage") or {}
         usage = TokenUsage(
             input_tokens=raw_usage.get("prompt_tokens") or 0,
@@ -163,9 +205,19 @@ class OpenRouterCompletions:
         )
 
         model = str(raw.get("model") or requested_model)
-        # Price by the model we asked for, not the one echoed back, matching
-        # the Anthropic adapter's convention (billing follows the request).
-        cost, unknown_pricing = price_or_fallback(usage, model=requested_model, when=when)
+        # Cost resolution order: (1) OpenRouter's own reported cost for this
+        # exact call — the only figure that's actually correct for an
+        # arbitrary BYOK model; (2) the static RATES table when the model is
+        # one of ours and the provider didn't report a cost; (3)
+        # `price_or_fallback`'s documented conservative estimate, which never
+        # raises `UnknownRate` and never looks silently free (found live
+        # 2026-08-28 — see `pricing.price_or_fallback`).
+        response_cost = raw_usage.get("cost")
+        if response_cost is not None:
+            cost = Decimal(str(response_cost))
+            unknown_pricing = False
+        else:
+            cost, unknown_pricing = price_or_fallback(usage, model=requested_model, when=when)
         running = self._ledger.record(run_id, cost)
 
         log.info(
@@ -185,4 +237,44 @@ class OpenRouterCompletions:
             stop_reason=stop,
             model=model,
             cost_usd=cost,
+            tool_calls=tool_calls,
         )
+
+
+def _parse_tool_calls(raw_tool_calls: Any) -> tuple[ToolCall, ...]:
+    """OpenAI wire shape: a list of `{"id", "type": "function", "function":
+    {"name", "arguments": "<json string>"}}`. Absent/empty on every ordinary
+    (non-tool) response, so the common case is a zero-cost no-op."""
+    if not raw_tool_calls:
+        return ()
+    parsed: list[ToolCall] = []
+    for item in raw_tool_calls:
+        function = item.get("function") or {}
+        parsed.append(
+            ToolCall(
+                id=item.get("id", ""),
+                name=function.get("name", ""),
+                arguments=_parse_tool_arguments(function.get("arguments")),
+            )
+        )
+    return tuple(parsed)
+
+
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    """Defensive json-load (T-05-01): a model-influenced, malformed
+    `arguments` string must not crash the adapter and is never `eval`'d. A
+    string that isn't valid JSON, or JSON that isn't an object, is wrapped
+    rather than dropped, so the caller still sees exactly what the model
+    sent."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        loaded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        log.warning("llm.tool_call_arguments_malformed", raw=str(raw)[:200])
+        return {"_raw": raw}
+    if isinstance(loaded, dict):
+        return loaded
+    return {"_raw": loaded}

@@ -22,12 +22,18 @@ __all__ = [
     "Role",
     "StopReason",
     "TokenUsage",
+    "ToolCall",
+    "ToolsNotSupportedError",
 ]
 
 
 class Role(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
+    """A tool-result turn: the answer to a ToolCall the model made on a prior
+    assistant turn. Carries `tool_call_id` (see `Message`) so the provider can
+    match the result back to the call that requested it."""
 
 
 class StopReason(StrEnum):
@@ -42,6 +48,7 @@ class StopReason(StrEnum):
     END_TURN = "end_turn"
     MAX_TOKENS = "max_tokens"
     REFUSAL = "refusal"
+    TOOL_USE = "tool_use"
     OTHER = "other"
 
 
@@ -49,6 +56,28 @@ class StopReason(StrEnum):
 class Message:
     role: Role
     content: str
+    name: str | None = None
+    """The tool name, when this message either requests or answers a tool
+    call. Optional and defaulted so every existing USER/ASSISTANT caller is
+    unaffected."""
+
+    tool_call_id: str | None = None
+    """Set on a TOOL-role message: the id of the `ToolCall` this message
+    answers, matching the id the provider assigned on the assistant turn that
+    requested it. `None` on USER/ASSISTANT messages."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One tool invocation the model asked for.
+
+    `arguments` is always a `dict` — a provider that returns a malformed
+    arguments payload gets defensively wrapped rather than raised, crashed
+    on, or `eval`'d (see each adapter's own parsing)."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +132,13 @@ class CompletionRequest:
     and every implementation has the same signature. An adapter that quietly
     accepts an extra kwarg is not substitutable for one that doesn't."""
 
+    tools: tuple[dict[str, Any], ...] | None = None
+    """OpenAI function-tool definitions (`{"type": "function", "function":
+    {...}}`), passed through to the provider verbatim. `None` means no tools
+    are offered for this call — the OpenAI wire shape was chosen because it
+    is what OpenRouter's own endpoint already speaks, so this field needs no
+    translation on that adapter and only a small one on the Anthropic side."""
+
 
 @dataclass(frozen=True, slots=True)
 class CompletionResponse:
@@ -119,6 +155,10 @@ class CompletionResponse:
     knows which model actually served it. Defaults to zero so the fake needs
     no pricing logic."""
 
+    tool_calls: tuple[ToolCall, ...] = ()
+    """Populated when `stop_reason` is `TOOL_USE`. Empty tuple rather than
+    `None` when there are none, so a caller can iterate unconditionally."""
+
     @property
     def refused(self) -> bool:
         return self.stop_reason is StopReason.REFUSAL
@@ -130,6 +170,17 @@ class CompletionError(RuntimeError):
     Distinct from a refusal. A refusal is a successful call with a decision
     attached; this is the call not happening.
     """
+
+
+class ToolsNotSupportedError(CompletionError):
+    """The provider rejected `tools` for this model.
+
+    A distinct subtype of `CompletionError` (not a new sibling) so any
+    existing `except CompletionError` call site keeps working unchanged,
+    while the runner can `except ToolsNotSupportedError` specifically to
+    skip tool-surface tests for that one model and say so in the report
+    rather than aborting the whole scan (§1.3, honest coverage over fake
+    completeness)."""
 
 
 class Completions(Protocol):

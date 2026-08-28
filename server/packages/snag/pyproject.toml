@@ -18,6 +18,8 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.9",
     "psycopg[binary]>=3.2",
+    "jsonschema>=4.26.0",
+    "defusedxml>=0.7.1",
 ]
 
 [project.scripts]

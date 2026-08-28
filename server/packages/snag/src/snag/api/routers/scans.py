@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_slug
+from snag.api.deps import get_completions, require_funding, require_slug
 from substrate.llm import CompletionRequest, Completions, Message, Role
 
 log = structlog.get_logger(__name__)
@@ -89,6 +89,7 @@ async def start_scan(
     body: StartScanRequest,
     request: Request,
     completions: Completions = Depends(get_completions),  # noqa: B008 - FastAPI DI idiom
+    _funded: None = Depends(require_funding),
 ) -> StartScanResponse:
     project = await require_slug(request, body.slug)
     state = ctx(request)

@@ -1,13 +1,18 @@
 """Request-scoped dependencies.
 
-`get_completions` is the SEAM plan 01-02 extends: per-request BYOK header
-(`X-OpenRouter-Key`) -> owner env key -> examples-only (scans disabled, but
-the seeded read-only examples still browse). This plan (01-01) wires the
-owner-key path only — the tracer's `<human-check>` needs `OPENROUTER_API_KEY`
-set precisely because that fallback chain doesn't exist yet.
+`get_completions` is the SEAM 01-01 opened and this plan (01-02) finishes:
+per-request BYOK header (`X-OpenRouter-Key`) -> owner env key ->
+examples-only (scans disabled, but the seeded read-only examples still
+browse). `resolve_key` is the single place that precedence is decided;
+`require_funding` turns "nothing resolved" into a 402 on scan-funding
+endpoints only — read/report/examples endpoints never depend on it, so they
+stay browsable key-free even with no owner key configured.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
 
 import asyncpg
 from fastapi import HTTPException, Request
@@ -16,14 +21,69 @@ from snag.api.app import ctx
 from substrate.llm import Completions
 from substrate.llm.factory import build_completions
 
+_BYOK_HEADER = "X-OpenRouter-Key"
+
+KeySource = Literal["byok", "owner", "none"]
+
+
+@dataclass(frozen=True, slots=True)
+class KeyResolution:
+    """Which key funds this request's model calls, and where it came from.
+
+    `key` is held only long enough to build this request's adapter — never
+    logged, never persisted, never echoed in a response body (T-02-01)."""
+
+    key: str | None
+    source: KeySource
+    owner_funded: bool
+
+
+def resolve_key(request: Request) -> KeyResolution:
+    """BYOK header > owner env key > none.
+
+    A per-request `X-OpenRouter-Key` funds that request regardless of
+    whether an owner key is configured. Absent it, the owner
+    `OPENROUTER_API_KEY` funds the request (`owner_funded=True`, so
+    `ratelimit.guard_owner_scans` can single those requests out — a BYOK
+    request is never rate limited). Absent both, `source="none"`;
+    `require_funding` is what turns that into a 402.
+    """
+    header_key = request.headers.get(_BYOK_HEADER)
+    if header_key:
+        return KeyResolution(key=header_key, source="byok", owner_funded=False)
+    owner_key = ctx(request).settings.openrouter_api_key
+    if owner_key:
+        return KeyResolution(key=owner_key, source="owner", owner_funded=True)
+    return KeyResolution(key=None, source="none", owner_funded=False)
+
 
 def get_completions(request: Request) -> Completions:
+    """Build a fresh, per-request Completions adapter funded by whichever
+    key `resolve_key` resolves — never a startup-built shared client, since
+    the funding key can differ on every single request."""
     state = ctx(request)
+    resolution = resolve_key(request)
     return build_completions(
         provider=state.settings.llm_provider,
-        api_key=state.settings.openrouter_api_key,
+        api_key=resolution.key or "",
         ledger=state.ledger,
     )
+
+
+def require_funding(request: Request) -> None:
+    """Dependency for scan-funding endpoints only. Raises 402 when no key
+    resolves at all; BYOK and owner-funded requests pass through untouched.
+    Read/report/examples endpoints never depend on this, so they stay
+    browsable key-free."""
+    resolution = resolve_key(request)
+    if resolution.source == "none":
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "no OpenRouter key available to fund this scan — "
+                "set X-OpenRouter-Key or configure an owner OPENROUTER_API_KEY"
+            ),
+        )
 
 
 async def require_slug(request: Request, slug: str) -> asyncpg.Record:

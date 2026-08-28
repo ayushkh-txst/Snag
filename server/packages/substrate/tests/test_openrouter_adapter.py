@@ -171,13 +171,15 @@ async def test_json_schema_is_injected_into_the_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_model_raises_rather_than_pricing_it_as_free() -> None:
-    """Same discipline as the Anthropic adapter: an unpriced model is a gap
-    to fix, not a call that quietly looks free."""
-    from substrate.llm.pricing import UnknownRate
-
+async def test_unknown_model_gets_a_conservative_estimate_not_a_lost_response() -> None:
+    """A BYOK model with no RATES entry must not crash a real, successful
+    response over its own cost accounting (found live 2026-08-28 against two
+    of Snag's ACCEPTED_MODELS). It also must not look free — `price_or_fallback`
+    charges a documented conservative flat rate and flags `unknown_pricing`,
+    preserving the module's real discipline (never silently free) one layer
+    up from the exact, still-raising `price()`."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_chat_completion(model="some/unpriced-model"))
 
-    with pytest.raises(UnknownRate):
-        await _adapter(handler).complete(_request(model="some/unpriced-model"))
+    response = await _adapter(handler).complete(_request(model="some/unpriced-model"))
+    assert response.cost_usd > 0

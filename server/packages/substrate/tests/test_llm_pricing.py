@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from substrate.llm import TokenUsage
-from substrate.llm.pricing import CostLedger, UnknownRate, price, rate_for
+from substrate.llm.pricing import CostLedger, UnknownRate, price, price_or_fallback, rate_for
 
 
 def test_fresh_input_and_output_priced_separately() -> None:
@@ -100,3 +100,26 @@ def test_gpt_5_6_luna_pricing() -> None:
     usage = TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000)
     cost = price(usage, model="openai/gpt-5.6-luna", when=date(2026, 8, 23))
     assert cost == Decimal("1.400000")
+
+
+def test_price_or_fallback_never_raises_for_an_unpriced_model() -> None:
+    """Found live on 2026-08-28: two of Snag's ACCEPTED_MODELS (BYOK,
+    arbitrary OpenRouter models) have no RATES entry. `price()` itself must
+    stay exact and raising (tested above); the adapters' own post-call cost
+    accounting must not crash a real, successful response over it."""
+    usage = TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000)
+    when = date(2026, 8, 28)
+    with pytest.raises(UnknownRate):
+        price(usage, model="qwen/qwen3.8-flash", when=when)
+    cost, unknown_pricing = price_or_fallback(usage, model="qwen/qwen3.8-flash", when=when)
+    assert unknown_pricing is True
+    assert cost == Decimal("4.000000")
+
+
+def test_price_or_fallback_matches_price_for_a_known_model() -> None:
+    usage = TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000)
+    when = date(2026, 8, 23)
+    exact = price(usage, model="openai/gpt-5.6-luna", when=when)
+    cost, unknown_pricing = price_or_fallback(usage, model="openai/gpt-5.6-luna", when=when)
+    assert unknown_pricing is False
+    assert cost == exact

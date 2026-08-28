@@ -21,7 +21,7 @@ from substrate.llm import (
     StopReason,
     TokenUsage,
 )
-from substrate.llm.pricing import CostLedger, price
+from substrate.llm.pricing import CostLedger, price_or_fallback
 from substrate.resilience import full_jitter_delay
 
 log = structlog.get_logger(__name__)
@@ -165,7 +165,7 @@ class OpenRouterCompletions:
         model = str(raw.get("model") or requested_model)
         # Price by the model we asked for, not the one echoed back, matching
         # the Anthropic adapter's convention (billing follows the request).
-        cost = price(usage, model=requested_model, when=when)
+        cost, unknown_pricing = price_or_fallback(usage, model=requested_model, when=when)
         running = self._ledger.record(run_id, cost)
 
         log.info(
@@ -176,6 +176,7 @@ class OpenRouterCompletions:
             tokens_in=usage.input_tokens,
             tokens_out=usage.output_tokens,
             cost_usd=str(cost),
+            unknown_pricing=unknown_pricing,
             run_total_usd=str(running),
         )
         return CompletionResponse(

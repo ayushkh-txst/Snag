@@ -16,7 +16,7 @@ from substrate.llm import (
     StopReason,
     TokenUsage,
 )
-from substrate.llm.pricing import CostLedger, price
+from substrate.llm.pricing import CostLedger, price_or_fallback
 from substrate.resilience import full_jitter_delay
 
 log = structlog.get_logger(__name__)
@@ -137,7 +137,7 @@ class AnthropicCompletions:
         # back — asking for `claude-haiku-4-5` returns the dated alias
         # `claude-haiku-4-5-20251001`, and the rate table is keyed by the
         # aliases we send. Billing is determined by the request, not the echo.
-        cost = price(usage, model=model, when=when)
+        cost, unknown_pricing = price_or_fallback(usage, model=model, when=when)
         running = self._ledger.record(run_id, cost)
 
         category = None
@@ -154,6 +154,7 @@ class AnthropicCompletions:
             tokens_out=usage.output_tokens,
             cache_read=usage.cache_read_tokens,
             cost_usd=str(cost),
+            unknown_pricing=unknown_pricing,
             run_total_usd=str(running),
         )
         return CompletionResponse(

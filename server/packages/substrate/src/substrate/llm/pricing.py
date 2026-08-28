@@ -138,6 +138,41 @@ def price(usage: TokenUsage, *, model: str, when: date) -> Decimal:
     return total.quantize(Decimal("0.000001"))
 
 
+# Conservative estimate used only when a model has no published rate. Found
+# live on 2026-08-28: Snag is BYOK (arbitrary OpenRouter models), and an
+# adapter's own post-call cost accounting used to call `price()` directly —
+# so a real, successful call against an unpriced model raised UnknownRate
+# and lost the response. These numbers sit above every real per-token rate
+# in RATES above, so the estimate is deliberately pessimistic rather than
+# an accidental discount.
+FALLBACK_INPUT_PER_MTOK = Decimal("1.00")
+FALLBACK_OUTPUT_PER_MTOK = Decimal("3.00")
+
+
+def price_or_fallback(usage: TokenUsage, *, model: str, when: date) -> tuple[Decimal, bool]:
+    """Like `price`, but never raises `UnknownRate`.
+
+    Returns `(cost, unknown_pricing)`. Use this from a hot path that must not
+    lose a real response over a missing price (an adapter's own cost
+    accounting); use `price`/`rate_for` directly anywhere an unpriced model
+    should be a loud failure instead (tests, audits, a pre-dispatch estimate
+    that wants to say so explicitly).
+    """
+    try:
+        return price(usage, model=model, when=when), False
+    except UnknownRate:
+        fresh_in = Decimal(usage.input_tokens) * FALLBACK_INPUT_PER_MTOK
+        cache_w = (
+            Decimal(usage.cache_write_tokens) * FALLBACK_INPUT_PER_MTOK * CACHE_WRITE_MULTIPLIER
+        )
+        cache_r = (
+            Decimal(usage.cache_read_tokens) * FALLBACK_INPUT_PER_MTOK * CACHE_READ_MULTIPLIER
+        )
+        out = Decimal(usage.output_tokens) * FALLBACK_OUTPUT_PER_MTOK
+        total = (fresh_in + cache_w + cache_r + out) / _PER_MILLION
+        return total.quantize(Decimal("0.000001")), True
+
+
 @dataclass
 class CostLedger:
     """Running spend, keyed by run_id.

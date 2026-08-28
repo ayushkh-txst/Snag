@@ -10,6 +10,7 @@ rounds at 3 (FOLLOWUP-01, FOLLOWUP-03).
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -24,7 +25,13 @@ SYSTEM_PROMPT = (
 )
 
 
-def _fake(status: str, checker_config: dict, *, conflict_note: str = "", follow_up: list[str] | None = None) -> FakeCompletions:
+def _fake(
+    status: str,
+    checker_config: dict[str, Any],
+    *,
+    conflict_note: str = "",
+    follow_up: list[str] | None = None,
+) -> FakeCompletions:
     payload = {
         "status": status,
         "checker_config": checker_config,
@@ -107,7 +114,10 @@ async def test_normalize_contradiction_is_flagged_never_silently_resolved() -> N
     fake = _fake(
         "conflict",
         {},
-        conflict_note="You said refunds are capped at $200, but also said 'no limit, use your judgement'.",
+        conflict_note=(
+            "You said refunds are capped at $200, but also said "
+            "'no limit, use your judgement'."
+        ),
     )
     result = await normalize_answer(
         fake,
@@ -123,7 +133,11 @@ async def test_normalize_contradiction_is_flagged_never_silently_resolved() -> N
 
 
 async def test_normalize_can_raise_a_follow_up_question() -> None:
-    fake = _fake("answered", {"limit_usd": 200}, follow_up=["Does the $200 cap apply per order or per customer?"])
+    fake = _fake(
+        "answered",
+        {"limit_usd": 200},
+        follow_up=["Does the $200 cap apply per order or per customer?"],
+    )
     result = await normalize_answer(
         fake,
         question="What is the refund cap in dollars?",
@@ -173,7 +187,7 @@ async def test_normalize_treats_malformed_json_as_an_unresolved_conflict_not_a_c
 
 
 async def test_normalize_rejects_an_unrecognized_status_as_a_conflict() -> None:
-    fake = _fake("who-knows", {"whatever": True})  # type: ignore[arg-type]
+    fake = _fake("who-knows", {"whatever": True})
     result = await normalize_answer(
         fake, question="q", answer_raw="a", system=SYSTEM_PROMPT, model=MODEL
     )

@@ -1,7 +1,8 @@
-"""GET /api/projects/{slug}/report and GET .../report/{break_id}: the real
-report surface (01-12), built entirely on `snag.report`'s aggregation over
-`attack_runs` — replacing the tracer's inline aggregation (01-01) that used
-to live in this file.
+"""GET /api/projects/{slug}/report, GET .../report/{break_id}, and
+POST .../report/{break_id}/false-positive: the real report surface (01-12),
+built entirely on `snag.report`'s aggregation over `attack_runs` —
+replacing the tracer's inline aggregation (01-01) that used to live in
+this file.
 """
 
 from __future__ import annotations
@@ -9,12 +10,23 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
 from snag.api.deps import require_slug
-from snag.report import aggregate_report, break_detail
+from snag.report import aggregate_report, break_detail, set_false_positive
 
 router = APIRouter()
+
+
+class FalsePositiveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: bool = True
+
+
+class FalsePositiveResponse(BaseModel):
+    ok: bool
 
 
 @router.get("/projects/{slug}/report")
@@ -35,3 +47,17 @@ async def get_break_detail(slug: str, break_id: str, request: Request) -> dict[s
     if detail is None:
         raise HTTPException(status_code=404, detail=f"no such break: {break_id}")
     return detail
+
+
+@router.post(
+    "/projects/{slug}/report/{break_id}/false-positive", response_model=FalsePositiveResponse
+)
+async def post_false_positive(
+    slug: str, break_id: str, body: FalsePositiveRequest, request: Request
+) -> FalsePositiveResponse:
+    await require_slug(request, slug)
+    state = ctx(request)
+    found = await set_false_positive(state.db, slug, break_id, body.value)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"no such break: {break_id}")
+    return FalsePositiveResponse(ok=True)

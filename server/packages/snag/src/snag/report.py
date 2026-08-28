@@ -16,7 +16,15 @@ former into the latter.
 Scoping: `rules[].attacks/breaks`, `surfaces[].tests`, `breaks[]`, and
 `bySurface` describe the LATEST scan only (matching the `scan` meta block
 this payload also carries) — so `sum(rule.attacks) <= scan.calls` holds
-even after a project has been scanned more than once.
+even after a project has been scanned more than once. False-positive
+EXCLUSION, by contrast, is computed from every `attack_runs` row this
+project has EVER produced for a given (rule, surface, technique) identity,
+regardless of which scan it's in — a mark made against an old scan's break
+must still suppress a brand new scan's break of the same identity
+(CHECK-06's "excluded ... from every future rescan"), and `runner.py`
+itself is out of scope for this plan, so a freshly-inserted rescan row
+always starts with its OWN `false_positive = false` — this module, not the
+row, is what remembers the exclusion.
 """
 
 from __future__ import annotations
@@ -43,7 +51,8 @@ _BREAK_ID_PREFIX = "b"
 
 BreakKey = tuple[int | None, int | None, str]
 """(rule_id, surface_id, technique_id) — the identity a `Break` groups
-`attack_runs` rows by."""
+`attack_runs` rows by, and the identity false-positive exclusion is keyed
+on. Deliberately excludes `scan_id`: exclusion must survive a rescan."""
 
 
 def _break_key(run: asyncpg.Record) -> BreakKey:
@@ -409,3 +418,34 @@ async def break_detail(db: Database, slug: str, break_id: str) -> dict[str, Any]
     key = _break_key(anchor)
     excluded = key in {_break_key(r) for r in all_run_rows if r["false_positive"]}
     return _build_break_entry(key, list(runs), excluded=excluded)
+
+
+async def set_false_positive(db: Database, slug: str, break_id: str, value: bool) -> bool:
+    """Set `false_positive = value` on every `attack_runs` row sharing
+    `break_id`'s (rule, surface, technique) identity, across every scan this
+    project has ever run — the write that makes the CURRENT report exclude
+    it immediately. `aggregate_report`/`break_detail` ALSO recompute
+    exclusion from scratch on every read (checking whether ANY row for that
+    identity is flagged, not just the row `break_id` happened to name), so a
+    brand new rescan's freshly-inserted row — which `runner.py` (out of
+    scope here) always inserts with `false_positive = false` — still reads
+    as excluded (CHECK-06's "every future rescan"). Returns `False` if
+    `break_id` doesn't resolve to a run in this project."""
+    async with db.acquire() as conn:
+        anchor = await _resolve_break_identity(conn, slug, break_id)
+        if anchor is None:
+            return False
+        await conn.execute(
+            """UPDATE attack_runs ar SET false_positive = $1
+               FROM scans s
+               WHERE ar.scan_id = s.id AND s.project_id = $2
+                 AND ar.technique_id = $3
+                 AND ar.rule_id IS NOT DISTINCT FROM $4
+                 AND ar.surface_id IS NOT DISTINCT FROM $5""",
+            value,
+            slug,
+            anchor["technique_id"],
+            anchor["rule_id"],
+            anchor["surface_id"],
+        )
+    return True

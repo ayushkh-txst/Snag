@@ -509,6 +509,160 @@ async def test_break_detail_for_unknown_break_returns_none(clean_db: Database) -
     assert await break_detail(clean_db, slug, "b999999") is None
 
 
+# ------------------------------------------------ Task 3: false-positive toggle
+
+
+async def test_false_positive_toggle_excludes_break_from_the_count(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    slug = "proj-fp"
+    await _make_project(clean_db, slug=slug)
+    rule_id = await _add_rule(clean_db, slug)
+    surface_id = await _add_surface(clean_db, slug)
+    scan_id = await _add_scan(clean_db, slug, mode="quick", repeats=1, call_count=1)
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "leaked it"}],
+        passed=False,
+        checker_output="forbidden_text FAILED",
+        evidence="leaked it",
+    )
+
+    async with client_factory(FakeCompletions()) as client:
+        before = await client.get(f"/api/projects/{slug}/report")
+        assert before.status_code == 200, before.text
+        before_json = before.json()
+        rule_before = next(r for r in before_json["rules"] if r["id"] == str(rule_id))
+        assert rule_before["breaks"] == 1
+        break_id = before_json["breaks"][0]["id"]
+
+        toggle = await client.post(
+            f"/api/projects/{slug}/report/{break_id}/false-positive", json={"value": True}
+        )
+        assert toggle.status_code == 200, toggle.text
+
+        after = await client.get(f"/api/projects/{slug}/report")
+        assert after.status_code == 200
+
+    after_json = after.json()
+    rule_after = next(r for r in after_json["rules"] if r["id"] == str(rule_id))
+    assert rule_after["breaks"] == 0
+
+    fp_break = next(b for b in after_json["breaks"] if b["id"] == break_id)
+    assert fp_break["falsePositive"] is True
+    assert fp_break["hits"] == 1  # still shown, just excluded from the count
+
+
+async def test_false_positive_exclusion_survives_a_rescan(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    slug = "proj-fp-rescan"
+    await _make_project(clean_db, slug=slug)
+    rule_id = await _add_rule(clean_db, slug)
+    surface_id = await _add_surface(clean_db, slug)
+    scan1 = await _add_scan(clean_db, slug, mode="quick", repeats=1, call_count=1)
+    run1 = await _add_attack_run(
+        clean_db,
+        scan_id=scan1,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "leaked it"}],
+        passed=False,
+        checker_output="forbidden_text FAILED",
+        evidence="leaked it",
+    )
+    break_id = f"b{run1}"
+
+    async with client_factory(FakeCompletions()) as client:
+        toggle = await client.post(
+            f"/api/projects/{slug}/report/{break_id}/false-positive", json={"value": True}
+        )
+        assert toggle.status_code == 200, toggle.text
+
+    # A rescan — same rule/surface/technique, a brand new attack_run row
+    # whose OWN false_positive defaults to false (runner.py is untouched by
+    # this plan).
+    scan2 = await _add_scan(clean_db, slug, mode="quick", repeats=1, call_count=1)
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan2,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "leaked it again"}],
+        passed=False,
+        checker_output="forbidden_text FAILED",
+        evidence="leaked it again",
+    )
+
+    report = await aggregate_report(clean_db, slug)
+    assert report is not None
+    rule = next(r for r in report["rules"] if r["id"] == str(rule_id))
+    assert rule["breaks"] == 0
+
+    new_break = report["breaks"][0]
+    assert new_break["falsePositive"] is True
+
+
+async def test_false_positive_toggle_can_be_reversed(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    slug = "proj-fp-reverse"
+    await _make_project(clean_db, slug=slug)
+    rule_id = await _add_rule(clean_db, slug)
+    surface_id = await _add_surface(clean_db, slug)
+    scan_id = await _add_scan(clean_db, slug, mode="quick", repeats=1, call_count=1)
+    run_id = await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "leaked it"}],
+        passed=False,
+        checker_output="forbidden_text FAILED",
+        evidence="leaked it",
+    )
+    break_id = f"b{run_id}"
+
+    async with client_factory(FakeCompletions()) as client:
+        marked = await client.post(
+            f"/api/projects/{slug}/report/{break_id}/false-positive", json={"value": True}
+        )
+        assert marked.status_code == 200
+
+        excluded = await client.get(f"/api/projects/{slug}/report")
+        assert (
+            next(r for r in excluded.json()["rules"] if r["id"] == str(rule_id))["breaks"] == 0
+        )
+
+        unmarked = await client.post(
+            f"/api/projects/{slug}/report/{break_id}/false-positive", json={"value": False}
+        )
+        assert unmarked.status_code == 200
+
+        restored = await client.get(f"/api/projects/{slug}/report")
+
+    assert next(r for r in restored.json()["rules"] if r["id"] == str(rule_id))["breaks"] == 1
+
+
+async def test_false_positive_toggle_for_unknown_break_is_404(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    slug = "proj-fp-404"
+    await _make_project(clean_db, slug=slug)
+    async with client_factory(FakeCompletions()) as client:
+        res = await client.post(
+            f"/api/projects/{slug}/report/b999999/false-positive", json={"value": True}
+        )
+    assert res.status_code == 404
+
+
 # -------------------------------------------------- End-to-end (kept from 01-01)
 
 

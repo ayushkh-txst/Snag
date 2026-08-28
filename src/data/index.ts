@@ -1,4 +1,4 @@
-import type { Break, Example, Rule, RuleCategory, Surface } from "./types";
+import type { Break, Example, Rule, RuleCategory, Surface, Turn } from "./types";
 import { retail } from "./ex-retail";
 import { rag } from "./ex-rag";
 import { coding, healthcare, hr, hardened } from "./ex-rest";
@@ -135,4 +135,56 @@ export function breakInput(b: Break): { where: string; text: string } {
 
 export function openQuestionsFor(ex: Example, ruleId: string) {
   return ex.questions.filter((q) => q.ruleId === ruleId);
+}
+
+/** Which repeats broke. Deterministic — the same scan always lays out the same way. */
+export function runOutcomes(b: Break): boolean[] {
+  const out = new Array<boolean>(b.repeats).fill(false);
+  const seed = b.techniqueId.length + b.hits;
+  let placed = 0;
+  for (let i = 0; placed < b.hits && i < b.repeats * 12; i++) {
+    const idx = (i * 7 + seed * 3 + Math.floor(i / b.repeats) * 5) % b.repeats;
+    if (!out[idx]) {
+      out[idx] = true;
+      placed += 1;
+    }
+  }
+  for (let i = 0; i < b.repeats && placed < b.hits; i++) {
+    if (!out[i]) {
+      out[i] = true;
+      placed += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * The conversation for one repeat. A run that broke is the recorded conversation with
+ * that run's reply; a run that held stops where the attack landed, because the tool
+ * call and everything after it only happened in the runs that broke.
+ */
+export function runTurns(b: Break, ordinal: number, broke: boolean): Turn[] {
+  const lastAssistant = [...b.turns].reverse().find((t) => t.role === "assistant");
+  if (broke) {
+    const alts = (b.variants ?? []).filter((v) => v.broke);
+    if (ordinal === 0 || alts.length === 0) return b.turns;
+    const v = alts[(ordinal - 1) % alts.length];
+    return b.turns.map((t) =>
+      t === lastAssistant ? { ...t, content: v.reply, evidence: v.evidence } : t,
+    );
+  }
+  let cut = 0;
+  b.turns.forEach((t, i) => {
+    if (t.role === "user" || t.planted) cut = i;
+  });
+  const base = b.turns.slice(0, cut + 1);
+  const held = (b.variants ?? []).filter((v) => !v.broke);
+  if (!held.length) return base;
+  return [...base, { role: "assistant" as const, content: held[ordinal % held.length].reply }];
+}
+
+export function checkerOutputFor(b: Break, broke: boolean) {
+  if (broke) return b.checkerOutput;
+  const type = b.checkerOutput.split(/\s/)[0];
+  return `${type} PASSED\n  nothing matched in this run`;
 }

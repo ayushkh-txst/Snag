@@ -82,6 +82,11 @@ export interface Break {
   turns: Turn[];
   checkerOutput: string;
   falsePositive: boolean;
+  /**
+   * Repeats of the same attack differ only in what the model replied, so runs are
+   * stored as alternative final turns rather than whole duplicate conversations.
+   */
+  variants?: { broke: boolean; reply: string; evidence?: string }[];
 }
 
 export interface Gap {

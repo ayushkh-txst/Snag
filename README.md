@@ -38,7 +38,7 @@ Node 20+. The app is served at `http://localhost:5173`.
 | `/e/:slug/config` | Mode, surfaces, repeats, hard caps, cost estimate |
 | `/e/:slug/scanning` | Live progress — rule × surface matrix, attack log, running cost |
 | `/e/:slug/report` | Coverage statement, per-rule break rates, checker configs |
-| `/e/:slug/report/:breakId` | Full transcript, checker output, mark false positive |
+| `/e/:slug/report/:breakId` | Every run of one attack, its transcript, mark false positive |
 | `/e/:slug/gaps` | Checklist misses and observed behaviour |
 | `/e/:slug/fixes` | Suggested diffs, apply, verify |
 | `/e/:slug/history` | Run comparison — fixed / new / unchanged |
@@ -86,6 +86,11 @@ Two things the fixtures must keep true, since the UI now leans on both:
 - Every rule with `breaks > 0` has at least one stored attack run, because the report
   leads with the text that broke it.
 - `sum(run.hits) === rule.breaks`, and `sum(rule.attacks) <= scan.calls`.
+- Every stored run carries `variants`: at least one alternative reply that broke and
+  one that held, since the break detail lets you step through all N repeats. Repeats
+  of the same attack differ only in the reply, so runs are stored as alternative final
+  turns rather than duplicate conversations. A run that held stops where the attack
+  landed — the tool call after it only happened in the runs that broke.
 
 ## Layout
 

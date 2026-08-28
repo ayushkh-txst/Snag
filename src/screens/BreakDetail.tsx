@@ -1,7 +1,14 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Marked, Pill } from "../components/ui";
-import { CATEGORY_LABEL, byslug, type Turn } from "../data";
+import {
+  CATEGORY_LABEL,
+  byslug,
+  checkerOutputFor,
+  runOutcomes,
+  runTurns,
+  type Turn,
+} from "../data";
 
 const ROLE_WORD: Record<Turn["role"], string> = {
   system: "system",
@@ -16,6 +23,8 @@ export function BreakDetail() {
   const ex = byslug(slug);
   const b = ex.breaks.find((x) => x.id === breakId);
   const [fp, setFp] = useState(b?.falsePositive ?? false);
+  const outcomes = useMemo(() => (b ? runOutcomes(b) : []), [b]);
+  const [run, setRun] = useState(() => Math.max(outcomes.indexOf(true), 0));
 
   if (!b) {
     return (
@@ -27,6 +36,11 @@ export function BreakDetail() {
 
   const rule = ex.rules.find((r) => r.id === b.ruleId)!;
   const surface = ex.surfaces.find((s) => s.id === b.surfaceId);
+  const broke = outcomes[run];
+  const ordinal = outcomes.slice(0, run + 1).filter((x) => x === broke).length - 1;
+  const turns = runTurns(b, ordinal, broke);
+  const step = (dir: 1 | -1) =>
+    setRun((n) => Math.min(Math.max(n + dir, 0), outcomes.length - 1));
 
   return (
     <>
@@ -59,16 +73,46 @@ export function BreakDetail() {
         </dl>
       </header>
 
+      <section className="runs">
+        <header className="runs__head">
+          <span className="label">every run of this attack</span>
+          <div className="runs__nav">
+            <button className="runs__step" onClick={() => step(-1)} disabled={run === 0} aria-label="Previous run">←</button>
+            <span className="runs__now mono">
+              run {run + 1} of {b.repeats} · <span data-broke={broke || undefined}>{broke ? "broke" : "held"}</span>
+            </span>
+            <button className="runs__step" onClick={() => step(1)} disabled={run === outcomes.length - 1} aria-label="Next run">→</button>
+          </div>
+        </header>
+        <div className="runs__strip">
+          {outcomes.map((o, i) => (
+            <button
+              key={i}
+              className="runs__cell"
+              data-broke={o || undefined}
+              data-on={i === run || undefined}
+              onClick={() => setRun(i)}
+              aria-label={`Run ${i + 1} of ${b.repeats}, ${o ? "broke" : "held"}`}
+              aria-pressed={i === run}
+            />
+          ))}
+        </div>
+        <p className="runs__note dim">
+          Same attack, same wording, {b.repeats} times. Only the reply changed —{" "}
+          {b.hits} of them broke the rule.
+        </p>
+      </section>
+
       <div className="bd__grid">
         <section className="transcript">
           <header className="panel__head">
-            <span className="label">full conversation</span>
+            <span className="label">run {run + 1} of {b.repeats}</span>
             <div className="panel__aside">
               <span className="tkey"><i data-k="planted" /> planted by the attack</span>
               <span className="tkey"><i data-k="evidence" /> what the checker matched</span>
             </div>
           </header>
-          {b.turns.map((t, i) => (
+          {turns.map((t, i) => (
             <article className="turn" key={i} data-role={t.role}>
               <div className="turn__role">
                 <span className="mono">{ROLE_WORD[t.role]}</span>
@@ -89,8 +133,10 @@ export function BreakDetail() {
 
         <aside className="bd__side">
           <div className="checkout">
-            <p className="label">checker output</p>
-            <pre className="checkout__pre mono">{b.checkerOutput}</pre>
+            <p className="label">checker output · run {run + 1}</p>
+            <pre className="checkout__pre mono" data-held={!broke || undefined}>
+              {checkerOutputFor(b, broke)}
+            </pre>
           </div>
 
           <div className="fpbox" data-on={fp || undefined}>

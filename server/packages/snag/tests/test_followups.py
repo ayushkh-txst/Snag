@@ -244,7 +244,10 @@ def test_normalized_dataclass_defaults() -> None:
 
 
 async def _seed_project_with_open_question(
-    clean_db: Database, *, model: str = MODEL, question_text: str = "What is the refund cap in dollars?"
+    clean_db: Database,
+    *,
+    model: str = MODEL,
+    question_text: str = "What is the refund cap in dollars?",
 ) -> tuple[str, int, int]:
     """Insert a project, a prompt version, one testable rule, and one open
     question — enough scaffolding for the questions endpoints, without going
@@ -368,7 +371,11 @@ async def test_post_endpoint_contradiction_is_shown_back_and_rule_left_alone(
     async with client_factory(fake) as client:
         res = await client.post(
             f"/api/projects/{slug}/questions/answers",
-            json={"answers": [{"question_id": question_id, "answer_raw": "$200, or no limit really"}]},
+            json={
+                "answers": [
+                    {"question_id": question_id, "answer_raw": "$200, or no limit really"}
+                ]
+            },
         )
     assert res.status_code == 200, res.text
     answered = res.json()["answered"][0]
@@ -415,7 +422,7 @@ async def test_post_endpoint_opens_a_new_round_when_a_follow_up_is_raised(
 async def test_post_endpoint_round_cap_stops_at_three_rounds(
     client_factory: ClientFactory, clean_db: Database
 ) -> None:
-    slug, rule_id, _question_id = await _seed_project_with_open_question(clean_db)
+    slug, _rule_id, _question_id = await _seed_project_with_open_question(clean_db)
     async with clean_db.acquire() as conn:
         await conn.execute("UPDATE questions SET round = 3 WHERE project_id = $1", slug)
         round3_question_id = await conn.fetchval(
@@ -450,7 +457,7 @@ async def test_post_endpoint_round_cap_stops_at_three_rounds(
 async def test_post_endpoint_stops_when_nothing_is_open_before_hitting_the_cap(
     client_factory: ClientFactory, clean_db: Database
 ) -> None:
-    slug, rule_id, question_id = await _seed_project_with_open_question(clean_db)
+    slug, _rule_id, question_id = await _seed_project_with_open_question(clean_db)
     fake = _fake("answered", {"limit_usd": 200})  # no follow_up_questions at all
     async with client_factory(fake) as client:
         res = await client.post(
@@ -466,7 +473,7 @@ async def test_post_endpoint_stops_when_nothing_is_open_before_hitting_the_cap(
 async def test_post_endpoint_answering_an_already_resolved_question_is_a_no_op(
     client_factory: ClientFactory, clean_db: Database
 ) -> None:
-    slug, rule_id, question_id = await _seed_project_with_open_question(clean_db)
+    slug, _rule_id, question_id = await _seed_project_with_open_question(clean_db)
     async with clean_db.acquire() as conn:
         await conn.execute(
             """UPDATE questions SET status = 'answered', answer_raw = 'already answered',
@@ -487,7 +494,7 @@ async def test_post_endpoint_answering_an_already_resolved_question_is_a_no_op(
 async def test_post_endpoint_404s_for_a_question_that_does_not_belong_to_the_project(
     client_factory: ClientFactory, clean_db: Database
 ) -> None:
-    slug, _rule_id, question_id = await _seed_project_with_open_question(clean_db)
+    _slug, _rule_id, question_id = await _seed_project_with_open_question(clean_db)
     async with clean_db.acquire() as conn:
         await conn.execute("INSERT INTO projects (id, model) VALUES ($1, $2)", "proj-other", MODEL)
     fake = FakeCompletions()

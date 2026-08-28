@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 import httpx
 import pytest
 
+from snag.api import ratelimit
 from snag.api.app import create_app
 from snag.api.deps import get_completions
 from snag.config import get_settings
@@ -29,8 +30,16 @@ async def running_app(fake: FakeCompletions) -> AsyncIterator[httpx.AsyncClient]
     DATABASE_URL at the test database before any Settings() is built, so
     `create_app()`'s lifespan connects there — never the dev database.
     `.cache_clear()` is defensive, not load-bearing.
+
+    `ratelimit._WINDOWS` is cleared too: it's a module-level, process-
+    lifetime dict by design (01-02's single-process limiter), but every
+    test in this suite drives requests through the SAME ASGI test-client IP
+    — without clearing it here, owner-funded `/api/scans` calls across
+    unrelated tests would all count against one shared per-IP window and
+    the whole suite would start 429ing itself once enough tests ran.
     """
     get_settings.cache_clear()
+    ratelimit._WINDOWS.clear()
     app = create_app()
     app.dependency_overrides[get_completions] = lambda: fake
     transport = httpx.ASGITransport(app=app)

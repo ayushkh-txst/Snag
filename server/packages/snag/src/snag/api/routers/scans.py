@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
 from snag.api.deps import get_completions, require_funding, require_slug
+from snag.api.ratelimit import guard_owner_scans
 from substrate.llm import CompletionRequest, Completions, Message, Role
 
 log = structlog.get_logger(__name__)
@@ -90,6 +91,7 @@ async def start_scan(
     request: Request,
     completions: Completions = Depends(get_completions),  # noqa: B008 - FastAPI DI idiom
     _funded: None = Depends(require_funding),
+    _rate_limited: None = Depends(guard_owner_scans),
 ) -> StartScanResponse:
     project = await require_slug(request, body.slug)
     state = ctx(request)

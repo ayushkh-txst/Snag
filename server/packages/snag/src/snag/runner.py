@@ -30,6 +30,11 @@ time as each is attempted, with a `scans.tool_support_note` recorded once so
 the report can say so (SIM-02) — INDIRECT never offers `tools` on its
 requests (it constructs the tool result itself rather than waiting for a
 live tool call), so it runs regardless of tool-calling support.
+
+After the attack matrix, the SAME scan runs a gap-probe pass (GAP-01,
+`snag.gaps`): the eight-item §8 checklist, probed once each, through this
+module's own `_dispatch` budget guard — never a second, uncapped call
+site (T-13-01).
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -51,11 +56,13 @@ from snag.attacks.library import TECHNIQUE_BY_ID, Technique
 from snag.checkers import run_checker
 from snag.checkers.transcript import Transcript, Turn
 from snag.cost import estimate_scan_cost
+from snag.gaps import GAP_CHECKLIST, persist_gap, probe_gap
 from snag.simulate import VARIANTS, poisoned_result, simulate_tool_result
 from substrate.db import Database
 from substrate.llm import (
     CompletionError,
     CompletionRequest,
+    CompletionResponse,
     Completions,
     Message,
     Role,
@@ -948,6 +955,44 @@ async def _run_scan(
                     int(rule["id"]),
                     int(surface["id"]),
                 )
+
+    # ------------------------------------------------------------ gap probes
+    # GAP-01/GAP-02 (project-3-spec.md §8): after the attack matrix, probe
+    # the same maintained checklist — through the SAME `_dispatch` budget
+    # guard as every attack above it (T-13-01), never a second, uncapped
+    # dispatch call site (see the module's own structural test in
+    # test_budget_caps.py, which greps this module for how many times its
+    # ONE completions call method is invoked).
+    async def _gap_dispatch(client: Completions, request: CompletionRequest) -> CompletionResponse:
+        return cast(CompletionResponse, await _dispatch(client, request, state))
+
+    for item in GAP_CHECKLIST:
+        try:
+            gap_result = await probe_gap(
+                completions,
+                project=project,
+                item=item,
+                model=model,
+                system_prompt=system_prompt,
+                tools=tools,
+                dispatch=_gap_dispatch,
+            )
+        except BudgetExceeded:
+            await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+            return
+        except ToolsNotSupportedError:
+            log.warning("scan.gap_probe_tools_unsupported", scan_id=scan_id, item=item.key)
+            continue
+        except CompletionError as exc:
+            log.warning(
+                "scan.gap_probe_dispatch_failed", scan_id=scan_id, item=item.key, error=repr(exc)
+            )
+            continue
+
+        async with db.acquire() as conn:
+            await persist_gap(
+                conn, scan_id=scan_id, project_id=project["id"], result=gap_result
+            )
 
     await _mark_scan_completed(db, scan_id, state)
 

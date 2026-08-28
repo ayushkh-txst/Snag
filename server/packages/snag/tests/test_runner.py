@@ -27,6 +27,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUES, RuleCategory, SurfaceKind
 from snag.cost import ModelPricing
+from snag.gaps import GAP_CHECKLIST
 from substrate.db import Database
 from substrate.llm import CompletionResponse, Completions, FakeCompletions, StopReason, TokenUsage
 from substrate.queue import Worker
@@ -268,7 +269,9 @@ async def test_worker_registers_kind_scan_and_drains_an_enqueued_job_end_to_end(
         [_attack_rule(rule_id, "tone_style")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
     )
-    fake.responses.extend(_safe_response() for _ in range(_dispatch_count(expected, repeats=1)))
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
+    )
 
     async with client_factory(fake) as client:
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
@@ -325,7 +328,9 @@ async def test_scan_handler_persists_attack_runs_across_rules_surfaces_and_repea
     )
     assert len(expected) >= 2  # a real matrix, not a single coincidental match
     repeats = 2
-    fake.responses.extend(_safe_response() for _ in range(_dispatch_count(expected, repeats)))
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats) + len(GAP_CHECKLIST))
+    )
 
     scan_body = {"slug": slug, "mode": "custom", "surfaces": ["direct", "tool"], "repeats": repeats}
     async with client_factory(fake) as client:
@@ -371,7 +376,9 @@ async def test_direct_and_tool_abuse_surfaces_are_both_exercised(
             _attack_surface(tool_id, kind="tool_param", path="issue_refund.amount"),
         ],
     )
-    fake.responses.extend(_safe_response() for _ in range(_dispatch_count(expected, repeats=1)))
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
+    )
 
     async with client_factory(fake) as client:
         res = await client.post(
@@ -414,7 +421,7 @@ async def test_scan_handler_persists_a_refusal_as_a_normal_run_not_an_error(
         CompletionResponse(
             text="", usage=TokenUsage(5, 0), stop_reason=StopReason.REFUSAL, model=MODEL
         )
-        for _ in range(_dispatch_count(expected, repeats=1))
+        for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
     )
 
     async with client_factory(fake) as client:
@@ -451,7 +458,9 @@ async def test_technique_stats_persist_counts_only_and_never_prompt_text(
         [_attack_surface(chat_id, kind="chat", path="user message")],
     )
     repeats = 3
-    fake.responses.extend(_safe_response() for _ in range(_dispatch_count(expected, repeats)))
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats) + len(GAP_CHECKLIST))
+    )
 
     scan_body = {"slug": slug, "mode": "custom", "surfaces": ["direct"], "repeats": repeats}
     async with client_factory(fake) as client:
@@ -500,7 +509,12 @@ async def test_run_scan_handler_only_attacks_seam_runs_just_that_subset(
     )
     assert len(all_attacks) >= 2  # tool_authorization + chat matches several techniques
     target = all_attacks[0]
+    # `only_attacks` narrows the ATTACK matrix to just `target` (one dispatch),
+    # but the gap-probe pass at the end of `_run_scan` still runs in full and
+    # unconditionally for every completed scan (GAP-01) — it has no
+    # `only_attacks` seam of its own.
     fake.responses.append(_safe_response())
+    fake.responses.extend(_safe_response() for _ in range(len(GAP_CHECKLIST)))
 
     async with client_factory(fake) as client:
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})

@@ -19,6 +19,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.instantiate import instantiate
 from snag.cost import ModelPricing
+from snag.gaps import GAP_CHECKLIST
 from substrate.db import Database
 from substrate.llm import CompletionResponse, FakeCompletions, StopReason, TokenUsage
 
@@ -160,10 +161,14 @@ async def test_a_scan_within_both_caps_completes_normally_with_no_skips(
         clean_db, slug=slug, repeats=repeats, call_cap=100, spend_cap=Decimal("5.00")
     )
 
-    fake = FakeCompletions(responses=[_safe_response() for _ in range(repeats)])
+    # Both caps are comfortably wide, so the scan also runs its gap-probe
+    # pass (GAP-01) to completion after the attack matrix — script for both.
+    fake = FakeCompletions(
+        responses=[_safe_response() for _ in range(repeats + len(GAP_CHECKLIST))]
+    )
     await runner.run_scan(clean_db, scan_id, completions=fake)
 
-    assert len(fake.calls) == repeats
+    assert len(fake.calls) == repeats + len(GAP_CHECKLIST)
     async with clean_db.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM scans WHERE id = $1", scan_id)
     assert row["status"] == "completed"

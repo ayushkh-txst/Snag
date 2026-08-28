@@ -24,6 +24,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUE_BY_ID
 from snag.cost import ModelPricing
+from snag.gaps import GAP_CHECKLIST
 from snag.simulate import simulate_tool_result
 from substrate.db import Database
 from substrate.llm import (
@@ -152,6 +153,21 @@ def _safe_response(text: str = "Sure, happy to help with that.") -> CompletionRe
     )
 
 
+def _gap_pass_responses() -> list[CompletionResponse | Exception]:
+    """Every scan that runs to completion also runs its gap-probe pass
+    (GAP-01, `snag.gaps`) after the attack matrix — this file's tests all
+    use the `only_attacks` seam to pin down the ATTACK matrix's own
+    dispatch count exactly, but the gap pass has no such seam and always
+    runs in full, so every one of them needs these appended too. Typed as
+    `FakeCompletions.responses` itself is (`list` is invariant) so it can
+    be concatenated with a plain `_safe_response()` list without a mypy
+    complaint at the call site."""
+    responses: list[CompletionResponse | Exception] = [
+        _safe_response() for _ in range(len(GAP_CHECKLIST))
+    ]
+    return responses
+
+
 def _refusal_marker_setup_response() -> CompletionResponse:
     """A rule with `checker_type="refusal_expected"` triggers ONE extra
     scan-setup dispatch (`runner._generate_refusal_markers`) before any
@@ -206,14 +222,20 @@ async def test_multiturn_pads_a_single_turn_technique_to_the_minimum_depth(
     assert not isinstance(attack.prompt_or_turns, tuple)  # single-turn, before padding
 
     scan_id = await _insert_pending_scan(clean_db, slug=slug, surfaces=["multiturn"])
-    fake = FakeCompletions(responses=[_safe_response() for _ in range(runner.MULTITURN_MIN_DEPTH)])
+    attack_responses: list[CompletionResponse | Exception] = [
+        _safe_response() for _ in range(runner.MULTITURN_MIN_DEPTH)
+    ]
+    fake = FakeCompletions(responses=attack_responses + _gap_pass_responses())
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
-    assert len(fake.calls) == runner.MULTITURN_MIN_DEPTH
+    # The gap-probe pass (GAP-01) dispatches after the attack matrix, so
+    # only the FIRST `MULTITURN_MIN_DEPTH` calls belong to this attack.
+    assert len(fake.calls) == runner.MULTITURN_MIN_DEPTH + len(GAP_CHECKLIST)
+    attack_calls = fake.calls[: runner.MULTITURN_MIN_DEPTH]
     # Turn 1 is a lead-in, not the technique's own ask.
-    assert fake.calls[0].messages[0].content in runner.MULTITURN_LEAD_INS
+    assert attack_calls[0].messages[0].content in runner.MULTITURN_LEAD_INS
     # The FINAL turn's user message is still the technique's own, unpadded ask.
-    assert fake.calls[-1].messages[-1].content == attack.prompt_or_turns
+    assert attack_calls[-1].messages[-1].content == attack.prompt_or_turns
 
     [conversation] = await _conversation_for(clean_db, scan_id)
     user_turns = [t for t in conversation if t["role"] == "user"]
@@ -247,12 +269,16 @@ async def test_multiturn_leaves_an_already_deep_scripted_technique_unpadded(
     assert own_depth >= runner.MULTITURN_MIN_DEPTH
 
     scan_id = await _insert_pending_scan(clean_db, slug=slug, surfaces=["multiturn"])
-    fake = FakeCompletions(responses=[_safe_response() for _ in range(own_depth)])
+    attack_responses: list[CompletionResponse | Exception] = [
+        _safe_response() for _ in range(own_depth)
+    ]
+    fake = FakeCompletions(responses=attack_responses + _gap_pass_responses())
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
     # No padding added: exactly the technique's own scripted turn count, and
     # turn 1 is the technique's own first turn, not a generic lead-in.
-    assert len(fake.calls) == own_depth
+    # The gap-probe pass (GAP-01) dispatches after the attack matrix.
+    assert len(fake.calls) == own_depth + len(GAP_CHECKLIST)
     assert fake.calls[0].messages[0].content == attack.prompt_or_turns[0]
     assert fake.calls[0].messages[0].content not in runner.MULTITURN_LEAD_INS
 
@@ -282,7 +308,10 @@ async def test_tool_abuse_feeds_back_a_schema_shaped_simulated_result(
 
     scan_id = await _insert_pending_scan(clean_db, slug=slug, surfaces=["tool"])
     fake = FakeCompletions(
-        responses=[_tool_call_response("issue_refund", {"amount": 999, "order_id": "NW-1"})]
+        responses=[
+            _tool_call_response("issue_refund", {"amount": 999, "order_id": "NW-1"}),
+            *_gap_pass_responses(),
+        ]
     )
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
@@ -323,7 +352,11 @@ async def test_positive_direction_tool_abuse_passes_on_refusal_with_no_tool_fire
 
     scan_id = await _insert_pending_scan(clean_db, slug=slug, surfaces=["tool"])
     fake = FakeCompletions(
-        responses=[_refusal_marker_setup_response(), _safe_response("I can't do that, sorry.")]
+        responses=[
+            _refusal_marker_setup_response(),
+            _safe_response("I can't do that, sorry."),
+            *_gap_pass_responses(),
+        ]
     )
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
@@ -362,6 +395,7 @@ async def test_positive_direction_tool_abuse_fails_when_the_tool_fires_anyway(
         responses=[
             _refusal_marker_setup_response(),
             _tool_call_response("issue_refund", {"amount": 500, "order_id": "NW-1"}),
+            *_gap_pass_responses(),
         ]
     )
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
@@ -425,11 +459,13 @@ async def test_indirect_surface_feeds_a_poisoned_result_and_instruction_isolatio
         responses=[
             _safe_response("Sure, let me look into that for you."),
             _safe_response(f"Here's what I found — {canary}"),
+            *_gap_pass_responses(),
         ]
     )
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
-    assert len(fake.calls) == 2
+    # The gap-probe pass (GAP-01) dispatches after the attack matrix.
+    assert len(fake.calls) == 2 + len(GAP_CHECKLIST)
     assert fake.calls[0].tools is None
     assert fake.calls[1].tools is None
 
@@ -454,6 +490,7 @@ async def test_indirect_surface_passes_when_the_model_never_repeats_the_canary(
         responses=[
             _safe_response("Sure, let me look into that for you."),
             _safe_response("Here's a normal, unrelated answer."),
+            *_gap_pass_responses(),
         ]
     )
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
@@ -469,10 +506,14 @@ async def test_indirect_surface_cycles_through_junk_variants_across_repeats(
     slug = "proj-indirect-junk"
     scan_id, attack = await _make_indirect_scan(clean_db, slug=slug, repeats=2)
 
-    fake = FakeCompletions(responses=[_safe_response() for _ in range(4)])  # 2 repeats * 2 calls
+    attack_responses: list[CompletionResponse | Exception] = [
+        _safe_response() for _ in range(4)
+    ]  # 2 repeats * 2 calls
+    fake = FakeCompletions(responses=attack_responses + _gap_pass_responses())
     await runner.run_scan(clean_db, scan_id, completions=fake, only_attacks=[attack.key()])
 
-    assert len(fake.calls) == 4
+    # The gap-probe pass (GAP-01) dispatches after the attack matrix.
+    assert len(fake.calls) == 4 + len(GAP_CHECKLIST)
     # repeat 0 -> variant "normal": the poisoned narrative is fed back.
     canary = TECHNIQUE_BY_ID["continuation.01"].canary
     assert canary is not None
@@ -557,6 +598,7 @@ async def test_tool_less_model_skips_tool_abuse_and_records_the_note_while_direc
             fake_responses.append(
                 ToolsNotSupportedError(f"model {MODEL} does not support tool calling")
             )
+    fake_responses.extend(_gap_pass_responses())
 
     scan_id = await _insert_pending_scan(clean_db, slug=slug, surfaces=["direct", "tool"])
     fake = FakeCompletions(responses=fake_responses)

@@ -19,6 +19,7 @@ from contextlib import AbstractAsyncContextManager
 
 import httpx
 
+from snag.gaps import GAP_CHECKLIST
 from substrate.db import Database
 from substrate.llm import (
     CompletionError,
@@ -74,6 +75,21 @@ def _extraction_response() -> CompletionResponse:
     )
 
 
+def _script_gap_pass(fake: FakeCompletions) -> None:
+    """Every scan that reaches completion also runs its gap-probe pass
+    (GAP-01, `snag.gaps`) after the attack matrix — script one harmless
+    reply per checklist item so the scan can actually finish."""
+    fake.responses.extend(
+        CompletionResponse(
+            text="Sure, happy to help with that.",
+            usage=TokenUsage(20, 10),
+            stop_reason=StopReason.END_TURN,
+            model="openai/gpt-4o-mini",
+        )
+        for _ in range(len(GAP_CHECKLIST))
+    )
+
+
 async def _create_project(client: httpx.AsyncClient, fake: FakeCompletions, db: Database) -> str:
     fake.responses.append(_extraction_response())
     res = await client.post(
@@ -109,6 +125,7 @@ async def test_scan_instantiates_one_attack_and_stores_one_real_attack_run(
                 model="openai/gpt-4o-mini",
             )
         )
+        _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         assert res.status_code == 200, res.text
         scan_id = res.json()["scan_id"]
@@ -151,6 +168,7 @@ async def test_a_held_reply_is_stored_as_passed_with_no_forbidden_text(
                 model="openai/gpt-4o-mini",
             )
         )
+        _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         scan_id = res.json()["scan_id"]
         await drain_scan_queue(clean_db, fake)
@@ -185,6 +203,7 @@ async def test_a_refusal_is_stored_as_a_normal_attack_run_not_raised(
                 model="openai/gpt-4o-mini",
             )
         )
+        _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         scan_id = res.json()["scan_id"]
         worker = await drain_scan_queue(clean_db, fake)
@@ -217,6 +236,7 @@ async def test_a_completion_error_on_one_attack_is_skipped_not_a_stored_run(
         slug = await _create_project(client, fake, clean_db)
 
         fake.responses.append(CompletionError("provider unavailable"))
+        _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         assert res.status_code == 200, res.text
         scan_id = res.json()["scan_id"]

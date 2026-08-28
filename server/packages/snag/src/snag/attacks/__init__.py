@@ -21,8 +21,8 @@ from snag.attacks.seed_techniques import seed_techniques
 
 __all__ = [
     "FAMILIES",
-    "TECHNIQUE_BY_ID",
     "TECHNIQUES",
+    "TECHNIQUE_BY_ID",
     "Attack",
     "Direction",
     "Rule",

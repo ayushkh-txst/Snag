@@ -58,6 +58,7 @@ def test_simulate_tool_result_normal_validates_against_the_schema() -> None:
 def test_simulate_tool_result_respects_enum_and_array_and_boolean() -> None:
     result = simulate_tool_result(_ENUM_SCHEMA)
     jsonschema.validate(instance=result, schema=_ENUM_SCHEMA)
+    assert isinstance(result, dict)
     assert result["lang"] == "en"  # first enum value, deterministically
     assert result["urgent"] is True
     assert len(result["tags"]) == 2  # minItems respected

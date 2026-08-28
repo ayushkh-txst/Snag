@@ -21,10 +21,14 @@ as something to `eval` or introspect beyond its declared shape.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from snag.attacks.library import Technique
 from snag.attacks.poisoned import poisoned_template
+
+# A tool result may be an object, a bare list (e.g. search results), or —
+# for the "malformed" junk variant — a plain (deliberately broken) string.
+SimulatedResult = str | dict[str, Any] | list[Any]
 
 VARIANTS: tuple[str, ...] = ("normal", "empty", "malformed", "contradictory")
 
@@ -60,7 +64,7 @@ def _fake_from_schema(schema: dict[str, Any]) -> Any:
     reproducible."""
     if "const" in schema:
         return schema["const"]
-    if "enum" in schema and schema["enum"]:
+    if schema.get("enum"):
         return schema["enum"][0]
 
     schema_type = _schema_type(schema)
@@ -90,7 +94,7 @@ def _fake_from_schema(schema: dict[str, Any]) -> Any:
 
 def simulate_tool_result(
     tool_schema: dict[str, Any] | None, *, variant: str = "normal"
-) -> str | dict[str, Any]:
+) -> SimulatedResult:
     """The 01-10 "full simulator" default: a deterministic fake tool result.
 
     `tool_schema` is a JSON Schema object (typically a tool's own
@@ -111,7 +115,7 @@ def simulate_tool_result(
       of what the tool's schema actually promises.
     """
     if variant == "normal":
-        return _fake_from_schema(tool_schema or {})
+        return cast(SimulatedResult, _fake_from_schema(tool_schema or {}))
     if variant == "empty":
         schema_type = _schema_type(tool_schema or {})
         if schema_type == "array":
@@ -126,9 +130,7 @@ def simulate_tool_result(
     raise ValueError(f"unknown simulate_tool_result variant: {variant!r}")
 
 
-def poisoned_result(
-    tool_schema: dict[str, Any] | None, technique: Technique
-) -> str | dict[str, Any]:
+def poisoned_result(tool_schema: dict[str, Any] | None, technique: Technique) -> SimulatedResult:
     """The indirect-injection surface's hand-authored payload: a normal-
     looking result (shaped like `tool_schema`, same as `simulate_tool_result`'s
     "normal" variant) with `technique`'s canary buried in an instruction

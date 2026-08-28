@@ -13,12 +13,14 @@ from decimal import Decimal
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from snag.api.app import ctx
 from snag.api.deps import require_funding, require_slug, validate_model
 from snag.api.ratelimit import guard_owner_scans
+from snag.api.sse import scan_event_stream
 from snag.cost import estimate_scan_cost
 from snag.runner import (
     DEFAULT_CALL_CAP,
@@ -199,6 +201,28 @@ async def get_scan(scan_id: int, request: Request) -> ScanRecordResponse:
         attacks_done=row["attacks_done"],
         breaks_found=row["breaks_found"],
         indicative_only=row["repeats"] == 1,
+    )
+
+
+@router.get("/scans/{scan_id}/stream")
+async def stream_scan(
+    scan_id: int,
+    request: Request,
+    since_seq: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    """PROGRESS-01: live scan progress over SSE, resumable on reconnect via
+    `?since_seq=`. Same lookup shape as `GET /scans/{scan_id}` — a 404 for an
+    unknown scan before ever opening the stream, rather than a stream that
+    opens and then silently hangs."""
+    state = ctx(request)
+    async with state.db.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM scans WHERE id = $1", scan_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"no such scan: {scan_id}")
+    return StreamingResponse(
+        scan_event_stream(state.db, scan_id, since_seq=since_seq),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

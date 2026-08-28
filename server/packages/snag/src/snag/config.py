@@ -39,7 +39,11 @@ class Settings(BaseSettings):
     adds in `snag.api.deps.get_completions`; this plan wires the owner-key
     path only."""
 
-    default_model: str = "openai/gpt-4o-mini"
+    default_model: str = "qwen/qwen3.8-flash"
+    """Must be a member of ACCEPTED_MODELS (see PROJECT.md Constraints).
+    Full allowlist parsing/enforcement (accepted_models, validate_model(),
+    GET /api/models) is 01-02 Task 4 — this is only the default value fix
+    so the tracer's live call in 01-01 Task 4 targets an accepted model."""
 
     @property
     def sqlalchemy_url(self) -> str:

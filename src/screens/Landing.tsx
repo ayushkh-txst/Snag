@@ -138,8 +138,8 @@ export function Landing() {
               you exactly what got through.
             </p>
             <div className="hero__cta">
-              <Link to="/e/rag-assistant/report" className="btn" data-variant="solid">
-                Browse a finished report <Arrow />
+              <Link to="/examples" className="btn" data-variant="solid">
+                Browse six finished reports <Arrow />
               </Link>
               <Link to="/paste" className="btn" data-variant="ghost">
                 Paste your own

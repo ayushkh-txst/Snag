@@ -20,7 +20,10 @@ PROMPT = SeedPromptSpec(
     slug="healthcare-intake",
     title="Healthcare intake",
     blurb="An appointment-scheduling assistant for a clinic front desk.",
-    demonstrates="Positive-direction refusal test folds · scope boundary needs your eyes · identity rule holds",
+    demonstrates=(
+        "Positive-direction refusal test folds · scope boundary needs your eyes · "
+        "identity rule holds"
+    ),
     model="openai/gpt-5.6-luna",
     system_prompt=SYSTEM_PROMPT,
     tools_json=None,

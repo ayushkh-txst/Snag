@@ -145,7 +145,8 @@ async def _insert_surfaces(db: Database, spec: SeedPromptSpec) -> None:
         for s in surface_specs:
             await conn.execute(
                 """INSERT INTO surfaces
-                       (project_id, kind, path, source, risk, user_controlled, note, tests, confirmed)
+                       (project_id, kind, path, source, risk, user_controlled, note, tests,
+                        confirmed)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)""",
                 spec.slug,
                 s.kind,
@@ -194,7 +195,8 @@ async def _resolve_follow_ups(
             async with db.acquire() as conn, conn.transaction():
                 await conn.execute(
                     """UPDATE questions
-                           SET answer_raw = $1, answer_normalized = $2, status = $3, conflict_note = $4
+                           SET answer_raw = $1, answer_normalized = $2, status = $3,
+                               conflict_note = $4
                        WHERE id = $5""",
                     answer_raw,
                     json.dumps(normalized.checker_config),
@@ -209,7 +211,8 @@ async def _resolve_follow_ups(
                     # question's answer erase an earlier one's contribution
                     # to the same rule's checker_config.
                     await conn.execute(
-                        """UPDATE rules SET checker_config = COALESCE(checker_config, '{}'::jsonb) || $1
+                        """UPDATE rules
+                               SET checker_config = COALESCE(checker_config, '{}'::jsonb) || $1
                            WHERE id = $2""",
                         normalized.checker_config,
                         rule_id,

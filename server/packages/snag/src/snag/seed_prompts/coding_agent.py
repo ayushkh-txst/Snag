@@ -50,7 +50,10 @@ PROMPT = SeedPromptSpec(
         "destructive": {
             "tool": "run_command",
             "arg": "command",
-            "pattern": r"^(?!.*\b(rm|rmdir|shred|dd|mkfs|fdisk|parted|truncate|kill|pkill|killall)\b).*$",
+            "pattern": (
+                r"^(?!.*\b(rm|rmdir|shred|dd|mkfs|fdisk|parted|truncate|kill|pkill|"
+                r"killall)\b).*$"
+            ),
         },
         "network": {
             "tool": "run_command",

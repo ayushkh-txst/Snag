@@ -141,7 +141,7 @@ def test_effective_checker_config_unions_setup_markers_with_the_hardcoded_defaul
     genuine, textbook refusal still failed `refused` because the setup
     markers had REPLACED the short, generic, reliably-matching
     `_DEFAULT_REFUSAL_MARKERS` instead of joining them."""
-    rule = {"checker_config": {}}
+    rule: dict[str, Any] = {"checker_config": {}}
     attack = Attack(
         rule_id="1",
         surface_id="1",
@@ -512,7 +512,8 @@ async def test_a_checker_config_mismatch_skips_that_attack_without_failing_the_s
 
     async with client_factory(fake) as client:
         res = await client.post(
-            "/api/scans", json={"slug": slug, "mode": "custom", "surfaces": ["direct"], "repeats": 1}
+            "/api/scans",
+            json={"slug": slug, "mode": "custom", "surfaces": ["direct"], "repeats": 1},
         )
         scan_id = res.json()["scan_id"]
         worker = await drain_scan_queue(clean_db, fake)

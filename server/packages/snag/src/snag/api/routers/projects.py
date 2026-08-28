@@ -57,9 +57,14 @@ async def create_project(
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="tools must be valid JSON") from exc
 
-    extracted = await extract_rules(
+    extraction = await extract_rules(
         completions, model=model, system=body.system_prompt, tools=body.tools
     )
+    if extraction.malformed:
+        # EXTRACT-02/EXTRACT-03: a shaky extraction pass degrades to "zero
+        # rules found" rather than a 500 — the user's type-your-own-rules
+        # safety net (added in 01-06 Task 2) is what makes this survivable.
+        log.warning("project.extraction_malformed", model=model)
 
     # Unguessable by construction (T-01-05) — 9 bytes -> 12 URL-safe base64
     # chars, never interpolated into SQL (T-01-04: bound as a parameter below).
@@ -79,7 +84,7 @@ async def create_project(
             body.system_prompt,
             tools_obj,
         )
-        for rule in extracted:
+        for rule in extraction.rules:
             await conn.execute(
                 """INSERT INTO rules
                        (project_id, text, category, direction, source_line,
@@ -105,7 +110,7 @@ async def create_project(
             slug,
         )
 
-    log.info("project.created", slug=slug, rules=len(extracted))
+    log.info("project.created", slug=slug, rules=len(extraction.rules))
     return CreateProjectResponse(slug=slug)
 
 

@@ -341,6 +341,21 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
     broke_line = top_output.splitlines()[0] if top_output else ""
     walkthrough = {"intent": "", "broke": broke_line, "why": "", "fix": ""}
 
+    # PRIV-02: the purge clock starts here, and ONLY here — the one place
+    # that has both `project` and `scan_row` already in scope. A genuinely
+    # completed scan (`scan_row is not None and scan_row["finished_at"] is
+    # not None`) must exist before the clock starts, so the pre-scan
+    # Rules/Questions/Surfaces/ScanConfig/Scanning screens — which all share
+    # `useProject` -> this same `GET .../report` call, long before any scan
+    # finishes — are structurally incapable of stamping it.
+    if (
+        project["ephemeral"]
+        and not project["seeded"]
+        and scan_row is not None
+        and scan_row["finished_at"] is not None
+    ):
+        await mark_report_served(db, slug)
+
     return {
         "slug": project["id"],
         "n": 0,

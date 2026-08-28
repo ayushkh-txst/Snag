@@ -17,11 +17,19 @@ export function Surfaces() {
   const { slug } = useParams();
   const { data: ex, loading, error, notFound } = useProject(slug);
   const [surfaces, setSurfaces] = useState<Surface[]>([]);
-  const confirmedOnceRef = useRef(false);
+  // Keyed by slug (not a plain boolean) and set SYNCHRONOUSLY before the
+  // `await` below, so React 18 StrictMode's dev-only double-invoke of this
+  // effect (mount -> cleanup -> mount again, same refs, before the first
+  // pass's promise even resolves) can't fire `generateSurfaces` a second
+  // time. `generateSurfaces` (POST) wipes and reinserts the WHOLE surfaces
+  // table — a second concurrent call deletes the first call's rows out
+  // from under any `toggleSurface(..., {confirmed: true})` already in
+  // flight, silently losing every confirmation but the last generation's.
+  const generatedForRef = useRef<string | null>(null);
+  const confirmedForRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!ex || !slug) return;
-    confirmedOnceRef.current = false;
     let cancelled = false;
 
     (async () => {
@@ -29,18 +37,19 @@ export function Surfaces() {
       // A brand new project only has the always-present `chat` row until
       // the full map is generated once — first visit to this step builds
       // it (POST regenerates the whole map from the latest prompt/tools).
-      if (list.length <= 1) {
+      if (list.length <= 1 && generatedForRef.current !== slug) {
+        generatedForRef.current = slug;
         try {
           list = await generateSurfaces(slug);
         } catch {
-          // fall back to whatever the report already had
+          generatedForRef.current = null; // allow a retry on the next render
         }
       }
       if (cancelled) return;
       setSurfaces(list);
 
-      if (!confirmedOnceRef.current) {
-        confirmedOnceRef.current = true;
+      if (confirmedForRef.current !== slug) {
+        confirmedForRef.current = slug;
         // SURFACE-03/the runner's own contract: a scan only ever dispatches
         // to a surface that is BOTH confirmed and user-controlled. Reaching
         // this step and seeing a surface's default state IS confirming it

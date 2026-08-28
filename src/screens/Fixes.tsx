@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { applyFix } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
@@ -18,6 +18,24 @@ export function Fixes() {
   const [results, setResults] = useState<Record<string, VerifyResult>>({});
   const [pending, setPending] = useState<string | null>(null);
   const [failed, setFailed] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!ex) return;
+    // A fix already applied in an earlier session still says `applied:
+    // true` on every GET — without this, a reload would show "Apply and
+    // verify" again for something already on file. `verify_scan_id`'s own
+    // `attacksDone`/`breaksFound` counters are NOT the same numbers
+    // `apply`'s response reported (that scan reruns the broken set at
+    // repeats=1, but each distinct broken identity can still expand into
+    // several real dispatched attacks — a technique can match more than
+    // one instantiated attack), so the exact before/after counts from an
+    // earlier session's `apply` call cannot be reconstructed from `GET
+    // /scans/{id}` after the fact; only this session's own `apply` call
+    // (below) knows them.
+    const alreadyApplied = ex.fixes.filter((f) => f.applied).map((f) => f.id);
+    if (alreadyApplied.length === 0) return;
+    setApplied((a) => [...new Set([...a, ...alreadyApplied])]);
+  }, [ex]);
 
   if (loading) return <Loading label="Loading fixes…" />;
   if (notFound) return <NotFound slug={slug} />;
@@ -126,7 +144,11 @@ export function Fixes() {
                 <div className="verify__side">
                   <span className="label">before</span>
                   <span className="verify__v mono" data-tone="snagged">
-                    {result ? `${result.beforeBreaks} broke` : `${rule.breaks} broke`}
+                    {result
+                      ? `${result.beforeBreaks} broke`
+                      : on
+                        ? "see the earlier scan"
+                        : `${rule.breaks} broke`}
                   </span>
                 </div>
                 <div className="verify__arrow" aria-hidden="true">
@@ -137,13 +159,19 @@ export function Fixes() {
                 <div className="verify__side">
                   <span className="label">after the edit, rerun</span>
                   <span className="verify__v mono" data-tone={on ? "held" : undefined}>
-                    {on && result ? `${result.afterBreaks} of ${result.beforeBreaks} still broke` : "not run yet"}
+                    {result
+                      ? `${result.afterBreaks} of ${result.beforeBreaks} still broke`
+                      : on
+                        ? "verified in an earlier session"
+                        : "not run yet"}
                   </span>
                 </div>
                 <p className="verify__note dim">
-                  {on
+                  {result
                     ? "Only the attacks that succeeded were rerun, against the edited prompt. Nothing else was retested."
-                    : "Apply the edit to rerun the attacks that succeeded. Snag will not show you a number it has not measured."}
+                    : on
+                      ? "Applied and verified earlier — see History for that scan's own count."
+                      : "Apply the edit to rerun the attacks that succeeded. Snag will not show you a number it has not measured."}
                 </p>
               </div>
             </article>

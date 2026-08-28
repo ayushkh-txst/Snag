@@ -131,6 +131,18 @@ export interface Fix {
   rationale: string;
   before: string;
   after: string;
+  /**
+   * 01-17: whether this fix was already applied in an earlier session —
+   * without this, a page reload after applying a fix would show every fix
+   * as "Apply and verify" again, contradicting what the server has on
+   * file. `verifyScanId` is the narrowed rerun scan `apply` created; its
+   * own `attacksDone`/`breaksFound` counters ARE this fix's before/after
+   * break counts (the rerun set IS exactly what broke originally), so a
+   * reload can recover the real verify numbers via `getScan` instead of
+   * losing them.
+   */
+  applied?: boolean;
+  verifyScanId?: number | null;
 }
 
 export interface HistoryRun {

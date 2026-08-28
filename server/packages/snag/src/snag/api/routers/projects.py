@@ -1,16 +1,21 @@
 """POST /api/projects (Paste): a pasted system prompt becomes a project, an
 extracted rule set, and the one always-present "chat" surface. GET returns
 the bare project row.
+
+This module also owns the rules-editing surface added in 01-06 Task 2
+(EXTRACT-03: add / edit / delete / toggle-testable, all against
+`app.state.db` with parameterized SQL).
 """
 
 from __future__ import annotations
 
 import json
 import secrets
+from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from snag.api.app import ctx
 from snag.api.deps import get_completions, require_slug, validate_model
@@ -21,11 +26,36 @@ from substrate.llm import Completions
 log = structlog.get_logger(__name__)
 router = APIRouter()
 
-# T-01-03: length caps enforced before any model call. Pydantic's max_length
-# rejects an oversized body with 422 during request parsing — before this
-# handler, and therefore before extract_rules ever runs.
+# T-01-03/T-06-04: length caps enforced before any model call or DB write.
+# Pydantic's max_length rejects an oversized body with 422 during request
+# parsing — before any handler body runs, and therefore before extract_rules
+# or an INSERT/UPDATE ever executes.
 MAX_SYSTEM_PROMPT_CHARS = 20_000
 MAX_TOOLS_CHARS = 50_000
+MAX_RULE_TEXT_CHARS = 2_000
+MAX_CHECKER_CONFIG_CHARS = 5_000
+
+#: T-06-03: the exhaustive, hand-maintained list of `rules` columns a PATCH
+#: may ever touch. Built from the Pydantic field names declared on
+#: `RulePatchRequest` (itself `extra="forbid"`) rather than from the request
+#: body's own keys, so there is no path from an attacker-controlled dict to
+#: an arbitrary column name reaching the UPDATE below.
+_PATCHABLE_RULE_FIELDS = (
+    "text",
+    "category",
+    "direction",
+    "checker_type",
+    "checker_config",
+    "testable",
+    "confidence",
+)
+
+
+def _validate_checker_config_size(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is not None and len(json.dumps(value)) > MAX_CHECKER_CONFIG_CHARS:
+        msg = f"checker_config must serialize to at most {MAX_CHECKER_CONFIG_CHARS} chars"
+        raise ValueError(msg)
+    return value
 
 
 class CreateProjectRequest(BaseModel):
@@ -38,6 +68,94 @@ class CreateProjectRequest(BaseModel):
 
 class CreateProjectResponse(BaseModel):
     slug: str
+
+
+class RuleCreateRequest(BaseModel):
+    """EXTRACT-03: a user-typed rule. Always persisted with `in_prompt =
+    false` and `confirmed_by_user = true` — a rule the user typed in was
+    never in the pasted prompt by definition, and is confirmed the moment
+    they add it (there is nothing left to confirm)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=MAX_RULE_TEXT_CHARS)
+    category: str = "other"
+    direction: str = "negative"
+    checker_type: str = "none"
+    checker_config: dict[str, Any] | None = None
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    _check_checker_config_size = field_validator("checker_config")(_validate_checker_config_size)
+
+
+class RulePatchRequest(BaseModel):
+    """EXTRACT-03 + T-06-03: every field here is optional (partial update),
+    but the fixed field set IS the allow-list — `model_dump(exclude_unset=
+    True)` in `update_rule` can only ever produce keys from this list, no
+    matter what extra keys the request body contained (rejected by
+    `extra="forbid"` with a 422 before the handler runs)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_RULE_TEXT_CHARS)
+    category: str | None = None
+    direction: str | None = None
+    checker_type: str | None = None
+    checker_config: dict[str, Any] | None = None
+    testable: bool | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    _check_checker_config_size = field_validator("checker_config")(_validate_checker_config_size)
+
+
+def _rule_row_to_ui(row: Any) -> dict[str, Any]:
+    """DB row (+ the `attacks`/`breaks` columns every query below joins in)
+    -> the UI's Rule shape (src/data/types.ts). `inPrompt` is Snag's own
+    addition beyond that shape: it is what lets the report distinguish a
+    user-typed rule from one the extractor actually found (EXTRACT-03)."""
+    entry: dict[str, Any] = {
+        "id": str(row["id"]),
+        "text": row["text"],
+        "category": row["category"],
+        "direction": row["direction"],
+        "sourceLine": row["source_line"] or "",
+        "checkerType": row["checker_type"],
+        "checkerConfig": row["checker_config"] or {},
+        "testable": row["testable"],
+        "confidence": float(row["confidence"] or 0.0),
+        "attacks": row["attacks"],
+        "breaks": row["breaks"],
+        "inPrompt": row["in_prompt"],
+    }
+    if not row["testable"]:
+        entry["untestableReason"] = (
+            "You added this rule; Snag tests the behaviour but it wasn't found in your prompt."
+            if not row["in_prompt"]
+            else "Snag's extractor could not derive a mechanical checker for this rule."
+        )
+    return entry
+
+
+# Every rules query below joins the same attack-run tally so a rule fetched
+# right after creation and one fetched after a scan carry the same shape —
+# no separate "before any scan" branch to keep in sync.
+_RULE_SELECT = """\
+    SELECT r.*,
+           COALESCE(a.attacks, 0) AS attacks,
+           COALESCE(a.breaks, 0) AS breaks
+    FROM rules r
+    LEFT JOIN (
+        SELECT rule_id, COUNT(*) AS attacks, COUNT(*) FILTER (WHERE NOT passed) AS breaks
+        FROM attack_runs
+        GROUP BY rule_id
+    ) a ON a.rule_id = r.id
+"""
+
+
+async def _fetch_rule(conn: Any, slug: str, rule_id: int) -> Any:
+    return await conn.fetchrow(
+        f"{_RULE_SELECT} WHERE r.project_id = $1 AND r.id = $2", slug, rule_id
+    )
 
 
 @router.post("/projects", response_model=CreateProjectResponse)
@@ -125,3 +243,100 @@ async def get_project(slug: str, request: Request) -> dict[str, object]:
         "seeded": row["seeded"],
         "createdAt": row["created_at"].isoformat(),
     }
+
+
+@router.get("/projects/{slug}/rules")
+async def list_rules(slug: str, request: Request) -> list[dict[str, Any]]:
+    await require_slug(request, slug)
+    state = ctx(request)
+    async with state.db.acquire() as conn:
+        rows = await conn.fetch(f"{_RULE_SELECT} WHERE r.project_id = $1 ORDER BY r.id", slug)
+    return [_rule_row_to_ui(row) for row in rows]
+
+
+@router.post("/projects/{slug}/rules", status_code=201)
+async def create_rule(slug: str, body: RuleCreateRequest, request: Request) -> dict[str, Any]:
+    """EXTRACT-03: a rule the user typed in — always `in_prompt = false`
+    (it wasn't in the pasted prompt by definition) and `confirmed_by_user =
+    true` (adding it IS confirming it)."""
+    await require_slug(request, slug)
+    state = ctx(request)
+    async with state.db.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """INSERT INTO rules
+                   (project_id, text, category, direction, source_line,
+                    checker_type, checker_config, testable, confidence,
+                    confirmed_by_user, in_prompt)
+               VALUES ($1, $2, $3, $4, '', $5, $6, $7, $8, true, false)
+               RETURNING id""",
+            slug,
+            body.text,
+            body.category,
+            body.direction,
+            body.checker_type,
+            body.checker_config or {},
+            body.checker_type != "none",
+            body.confidence,
+        )
+        rule = await _fetch_rule(conn, slug, row["id"])
+    log.info("rule.created", slug=slug, rule_id=row["id"])
+    return _rule_row_to_ui(rule)
+
+
+@router.patch("/projects/{slug}/rules/{rule_id}")
+async def update_rule(
+    slug: str, rule_id: int, body: RulePatchRequest, request: Request
+) -> dict[str, Any]:
+    """EXTRACT-03: partial update of text/category/direction/checker_type/
+    checker_config/testable/confidence. T-06-03: the only columns this can
+    ever touch are `_PATCHABLE_RULE_FIELDS` — every key in
+    `model_dump(exclude_unset=True)` comes from `RulePatchRequest`'s own
+    (fixed, `extra="forbid"`) field set, so there is no way for a request
+    body to name a column outside that list."""
+    await require_slug(request, slug)
+    updates = body.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    assert set(updates) <= set(_PATCHABLE_RULE_FIELDS)  # defence in depth, not the gate
+
+    set_clauses = []
+    values: list[Any] = []
+    for key, value in updates.items():
+        values.append(value)
+        set_clauses.append(f"{key} = ${len(values)}")
+    values.append(slug)
+    slug_param = len(values)
+    values.append(rule_id)
+    id_param = len(values)
+
+    state = ctx(request)
+    async with state.db.acquire() as conn, conn.transaction():
+        # S608: the interpolated fragment is a fixed comma-joined list of
+        # `key = $n` clauses whose keys come only from `_PATCHABLE_RULE_FIELDS`
+        # (asserted above) — every value is still bound as a `$n` parameter,
+        # never interpolated. No request-controlled string reaches this SQL.
+        updated = await conn.fetchval(
+            f"""UPDATE rules SET {", ".join(set_clauses)}
+                WHERE project_id = ${slug_param} AND id = ${id_param}
+                RETURNING id""",  # noqa: S608
+            *values,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="no such rule")
+        rule = await _fetch_rule(conn, slug, rule_id)
+    log.info("rule.updated", slug=slug, rule_id=rule_id, fields=list(updates))
+    return _rule_row_to_ui(rule)
+
+
+@router.delete("/projects/{slug}/rules/{rule_id}", status_code=204)
+async def delete_rule(slug: str, rule_id: int, request: Request) -> Response:
+    await require_slug(request, slug)
+    state = ctx(request)
+    async with state.db.acquire() as conn:
+        deleted = await conn.fetchval(
+            "DELETE FROM rules WHERE project_id = $1 AND id = $2 RETURNING id", slug, rule_id
+        )
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="no such rule")
+    log.info("rule.deleted", slug=slug, rule_id=rule_id)
+    return Response(status_code=204)

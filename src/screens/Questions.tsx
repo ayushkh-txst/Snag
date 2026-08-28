@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { byslug, type Example, type Question } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+import type { Example, Question } from "../data";
 
 function QuestionCard({
   q,
@@ -87,12 +89,12 @@ function QuestionCard({
 
 export function Questions() {
   const { slug } = useParams();
-  const ex = byslug(slug);
+  const { data: ex, loading, error, notFound } = useProject(slug);
 
   const { top, follows } = useMemo(() => {
     const first = new Map<string, Question>();
     const later: Question[] = [];
-    [...ex.questions]
+    [...(ex?.questions ?? [])]
       .sort((a, b) => a.round - b.round)
       .forEach((q) => {
         if (first.has(q.ruleId)) later.push(q);
@@ -100,6 +102,11 @@ export function Questions() {
       });
     return { top: [...first.values()], follows: later };
   }, [ex]);
+
+  if (loading) return <Loading label="Loading questions…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading questions…" />;
 
   return (
     <>

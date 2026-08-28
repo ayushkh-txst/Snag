@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, getReport } from "../api/client";
 import { StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
+import { ErrorState, Loading, NotFound } from "../components/States";
 import { Arrow, Coverage, Pill } from "../components/ui";
+import { useProject } from "../hooks/useProject";
 import {
   breakInput,
   checkerPlain,
@@ -66,48 +66,12 @@ function BrokenRule({ ex, rule, i }: { ex: Example; rule: Rule; i: number }) {
 
 export function Report() {
   const { slug } = useParams();
-  const [ex, setEx] = useState<Example | null>(null);
-  const [error, setError] = useState<ApiError | Error | null>(null);
+  const { data: ex, loading, error, notFound } = useProject(slug);
 
-  useEffect(() => {
-    if (!slug) return;
-    let cancelled = false;
-    setEx(null);
-    setError(null);
-    getReport(slug)
-      .then((data) => {
-        if (!cancelled) setEx(data);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err : new Error(String(err)));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [slug]);
-
-  if (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return (
-        <section className="panel">
-          <p>No report found for “{slug}”. The project may not exist, or nothing has been scanned yet.</p>
-        </section>
-      );
-    }
-    return (
-      <section className="panel">
-        <p>Couldn't load this report: {error.message}</p>
-      </section>
-    );
-  }
-
-  if (!ex) {
-    return (
-      <section className="panel">
-        <p>Loading report…</p>
-      </section>
-    );
-  }
+  if (loading) return <Loading label="Loading report…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading report…" />;
 
   return <ReportBody ex={ex} />;
 }
@@ -131,7 +95,9 @@ function ReportBody({ ex }: { ex: Example }) {
     .sort((a, b) => b.hits - a.hits);
   const maxHits = Math.max(...bySurface.map((x) => x.hits), 1);
 
-  const worstGap = ex.gaps.find((g) => !g.verdict.startsWith("No gap") && !g.verdict.startsWith("Covered"));
+  const worstGap = ex.gaps.find(
+    (g) => !(g.covered ?? (g.verdict.startsWith("No gap") || g.verdict.startsWith("Covered"))),
+  );
   const latest = ex.history[0];
 
   return (

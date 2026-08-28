@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { byslug } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
 
 const CHECKLIST = [
   "What to do when a tool fails",
@@ -13,10 +14,20 @@ const CHECKLIST = [
   "Situations the rules simply do not cover",
 ];
 
+function isCovered(g: { verdict: string; covered?: boolean }) {
+  return g.covered ?? (g.verdict.startsWith("No gap") || g.verdict.startsWith("Covered"));
+}
+
 export function Gaps() {
   const { slug } = useParams();
-  const ex = byslug(slug);
-  const covered = ex.gaps.filter((g) => g.verdict.startsWith("No gap") || g.verdict.startsWith("Covered"));
+  const { data: ex, loading, error, notFound } = useProject(slug);
+
+  if (loading) return <Loading label="Loading gaps…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading gaps…" />;
+
+  const covered = ex.gaps.filter(isCovered);
 
   return (
     <>
@@ -34,7 +45,7 @@ export function Gaps() {
 
       <div className="gaps">
         {ex.gaps.map((g, i) => {
-          const ok = g.verdict.startsWith("No gap") || g.verdict.startsWith("Covered");
+          const ok = isCovered(g);
           return (
             <article className="gap" key={g.id} data-ok={ok || undefined}>
               <div className="gap__n mono">{String(i + 1).padStart(2, "0")}</div>

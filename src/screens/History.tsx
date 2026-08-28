@@ -1,13 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { byslug } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
 
 export function History() {
   const { slug } = useParams();
-  const ex = byslug(slug);
-  const [sel, setSel] = useState(ex.history[0].id);
-  const run = ex.history.find((h) => h.id === sel)!;
+  const { data: ex, loading, error, notFound } = useProject(slug);
+  const [sel, setSel] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (ex) setSel(ex.history[0]?.id);
+  }, [ex]);
+
+  if (loading) return <Loading label="Loading history…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading history…" />;
+
+  const run = ex.history.find((h) => h.id === sel) ?? ex.history[0];
   const max = Math.max(...ex.history.map((h) => h.breaks), 1);
 
   return (

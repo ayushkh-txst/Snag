@@ -71,6 +71,22 @@ export interface Turn {
   evidence?: string;
 }
 
+export interface BreakVariant {
+  broke: boolean;
+  reply: string;
+  evidence?: string;
+  /**
+   * 01-16: the real full transcript and checker output for this one repeat,
+   * as returned by GET /report/{breakId} — additive over the narrow
+   * {broke, reply, evidence} shape so BreakDetail can render each run's
+   * actual conversation instead of reconstructing one.
+   */
+  turns?: Turn[];
+  checkerOutput?: string;
+  repeatIndex?: number;
+  runId?: number;
+}
+
 export interface Break {
   id: string;
   ruleId: string;
@@ -86,7 +102,7 @@ export interface Break {
    * Repeats of the same attack differ only in what the model replied, so runs are
    * stored as alternative final turns rather than whole duplicate conversations.
    */
-  variants?: { broke: boolean; reply: string; evidence?: string }[];
+  variants?: BreakVariant[];
 }
 
 export interface Gap {
@@ -95,6 +111,9 @@ export interface Gap {
   probe: string;
   observed: string;
   verdict: string;
+  /** 01-16: the real boolean the API computes server-side — prefer this
+   * over parsing `verdict`'s text when present. */
+  covered?: boolean;
 }
 
 export interface Fix {

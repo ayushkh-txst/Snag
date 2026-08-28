@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
+import { ErrorState, Loading, NotFound } from "../components/States";
 import { Coverage } from "../components/ui";
-import { CATEGORY_LABEL, byslug, checkerPlain, type Rule } from "../data";
+import { useProject } from "../hooks/useProject";
+import { CATEGORY_LABEL, checkerPlain, type Rule } from "../data";
 
 type EditableRule = Rule & { addedByUser?: boolean };
 
@@ -33,15 +35,24 @@ function SourcePane({ prompt, active }: { prompt: string; active?: string }) {
 
 export function Rules() {
   const { slug } = useParams();
-  const ex = byslug(slug);
-  const [rules, setRules] = useState<EditableRule[]>(ex.rules);
+  const { data: ex, loading, error, notFound } = useProject(slug);
+  const [rules, setRules] = useState<EditableRule[]>([]);
   const [active, setActive] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
+
+  useEffect(() => {
+    if (ex) setRules(ex.rules);
+  }, [ex]);
 
   const c = useMemo(() => {
     const testable = rules.filter((r) => r.testable).length;
     return { total: rules.length, testable, eyes: rules.length - testable };
   }, [rules]);
+
+  if (loading) return <Loading label="Loading rules…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading rules…" />;
 
   const needsDetail = (id: string) => ex.questions.some((q) => q.ruleId === id);
 

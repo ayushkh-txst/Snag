@@ -1,14 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { ApiError, getBreak } from "../api/client";
 import { Marked, Pill } from "../components/ui";
-import {
-  CATEGORY_LABEL,
-  byslug,
-  checkerOutputFor,
-  runOutcomes,
-  runTurns,
-  type Turn,
-} from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+import { CATEGORY_LABEL, type Break, type Turn } from "../data";
 
 const ROLE_WORD: Record<Turn["role"], string> = {
   system: "system",
@@ -20,25 +16,58 @@ const ROLE_WORD: Record<Turn["role"], string> = {
 
 export function BreakDetail() {
   const { slug, breakId } = useParams();
-  const ex = byslug(slug);
-  const b = ex.breaks.find((x) => x.id === breakId);
-  const [fp, setFp] = useState(b?.falsePositive ?? false);
-  const outcomes = useMemo(() => (b ? runOutcomes(b) : []), [b]);
-  const [run, setRun] = useState(() => Math.max(outcomes.indexOf(true), 0));
+  const { data: ex, loading: exLoading, error: exError, notFound: exNotFound } = useProject(slug);
 
-  if (!b) {
-    return (
-      <p className="dim">
-        No such break. <Link to={`/e/${ex.slug}/report`}>Back to the report</Link>.
-      </p>
-    );
-  }
+  const [b, setB] = useState<Break | null>(null);
+  const [breakLoading, setBreakLoading] = useState(true);
+  const [breakError, setBreakError] = useState<Error | null>(null);
+  const [breakNotFound, setBreakNotFound] = useState(false);
+  const [fp, setFp] = useState(false);
+  const [run, setRun] = useState(0);
 
-  const rule = ex.rules.find((r) => r.id === b.ruleId)!;
+  useEffect(() => {
+    if (!slug || !breakId) return;
+    let cancelled = false;
+    setB(null);
+    setBreakLoading(true);
+    setBreakError(null);
+    setBreakNotFound(false);
+    getBreak(slug, breakId)
+      .then((data) => {
+        if (cancelled) return;
+        setB(data);
+        setFp(data.falsePositive);
+        const firstBroken = (data.variants ?? []).findIndex((v) => v.broke);
+        setRun(Math.max(firstBroken, 0));
+        setBreakLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) setBreakNotFound(true);
+        else setBreakError(err instanceof Error ? err : new Error(String(err)));
+        setBreakLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, breakId]);
+
+  if (exLoading || breakLoading) return <Loading label="Loading break…" />;
+  if (exNotFound || breakNotFound) return <NotFound slug={slug} />;
+  if (exError) return <ErrorState error={exError} />;
+  if (breakError) return <ErrorState error={breakError} />;
+  if (!ex || !b) return <Loading label="Loading break…" />;
+
+  const rule = ex.rules.find((r) => r.id === b.ruleId);
   const surface = ex.surfaces.find((s) => s.id === b.surfaceId);
-  const broke = outcomes[run];
-  const ordinal = outcomes.slice(0, run + 1).filter((x) => x === broke).length - 1;
-  const turns = runTurns(b, ordinal, broke);
+  if (!rule) return <NotFound slug={slug} />;
+
+  const variants = b.variants ?? [];
+  const outcomes = variants.map((v) => v.broke);
+  const current = variants[run];
+  const broke = current?.broke ?? false;
+  const turns = current?.turns ?? b.turns;
+  const checkerOutput = current?.checkerOutput ?? b.checkerOutput;
   const step = (dir: 1 | -1) =>
     setRun((n) => Math.min(Math.max(n + dir, 0), outcomes.length - 1));
 
@@ -135,7 +164,7 @@ export function BreakDetail() {
           <div className="checkout">
             <p className="label">checker output · run {run + 1}</p>
             <pre className="checkout__pre mono" data-held={!broke || undefined}>
-              {checkerOutputFor(b, broke)}
+              {checkerOutput}
             </pre>
           </div>
 

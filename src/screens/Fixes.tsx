@@ -2,12 +2,18 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
-import { byslug } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
 
 export function Fixes() {
   const { slug } = useParams();
-  const ex = byslug(slug);
+  const { data: ex, loading, error, notFound } = useProject(slug);
   const [applied, setApplied] = useState<string[]>([]);
+
+  if (loading) return <Loading label="Loading fixes…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading fixes…" />;
 
   if (ex.fixes.length === 0) {
     return (

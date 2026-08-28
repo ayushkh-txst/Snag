@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { NextBar, StepHead } from "../components/Shell";
-import { SURFACE_GROUPS, byslug, surfaceTitle, type Surface } from "../data";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+import { SURFACE_GROUPS, surfaceTitle, type Surface } from "../data";
 
 const RISK_WHY: Record<Surface["risk"], string> = {
   high: "anything can go in here",
@@ -12,8 +14,17 @@ const RISK_WHY: Record<Surface["risk"], string> = {
 
 export function Surfaces() {
   const { slug } = useParams();
-  const ex = byslug(slug);
-  const [surfaces, setSurfaces] = useState<Surface[]>(ex.surfaces);
+  const { data: ex, loading, error, notFound } = useProject(slug);
+  const [surfaces, setSurfaces] = useState<Surface[]>([]);
+
+  useEffect(() => {
+    if (ex) setSurfaces(ex.surfaces);
+  }, [ex]);
+
+  if (loading) return <Loading label="Loading surfaces…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading surfaces…" />;
 
   const on = surfaces.filter((s) => s.userControlled && s.risk !== "none");
   const total = on.reduce((n, s) => n + s.tests, 0);

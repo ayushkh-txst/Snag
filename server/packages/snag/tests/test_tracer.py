@@ -6,8 +6,21 @@ as a single real attack_run — the walking skeleton this plan proves.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 
-from substrate.llm import CompletionError, CompletionResponse, FakeCompletions, StopReason, TokenUsage
+import httpx
+
+from substrate.db import Database
+from substrate.llm import (
+    CompletionError,
+    CompletionResponse,
+    FakeCompletions,
+    StopReason,
+    TokenUsage,
+)
+
+ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]
 
 SYSTEM_PROMPT = (
     "You are Ada, a support bot.\n"
@@ -43,7 +56,7 @@ def _extraction_response() -> CompletionResponse:
     )
 
 
-async def _create_project(client, fake: FakeCompletions) -> str:
+async def _create_project(client: httpx.AsyncClient, fake: FakeCompletions) -> str:
     fake.responses.append(_extraction_response())
     res = await client.post(
         "/api/projects",
@@ -54,7 +67,7 @@ async def _create_project(client, fake: FakeCompletions) -> str:
 
 
 async def test_scan_instantiates_one_attack_and_stores_one_real_attack_run(
-    client_factory, clean_db
+    client_factory: ClientFactory, clean_db: Database
 ) -> None:
     fake = FakeCompletions()
     async with client_factory(fake) as client:
@@ -92,7 +105,7 @@ async def test_scan_instantiates_one_attack_and_stores_one_real_attack_run(
 
 
 async def test_a_held_reply_is_stored_as_passed_with_no_forbidden_text(
-    client_factory, clean_db
+    client_factory: ClientFactory, clean_db: Database
 ) -> None:
     fake = FakeCompletions()
     async with client_factory(fake) as client:
@@ -117,12 +130,13 @@ async def test_a_held_reply_is_stored_as_passed_with_no_forbidden_text(
                WHERE s.project_id = $1""",
             slug,
         )
+    assert run is not None
     assert run["passed"] is True
     assert run["checker_output"].startswith("forbidden_text PASSED")
 
 
 async def test_a_refusal_is_stored_as_a_normal_attack_run_not_raised(
-    client_factory, clean_db
+    client_factory: ClientFactory, clean_db: Database
 ) -> None:
     fake = FakeCompletions()
     async with client_factory(fake) as client:
@@ -147,11 +161,12 @@ async def test_a_refusal_is_stored_as_a_normal_attack_run_not_raised(
                WHERE s.project_id = $1""",
             slug,
         )
+    assert run is not None
     assert run["passed"] is True
 
 
 async def test_a_completion_error_surfaces_as_502_not_a_stored_run(
-    client_factory, clean_db
+    client_factory: ClientFactory, clean_db: Database
 ) -> None:
     fake = FakeCompletions()
     async with client_factory(fake) as client:
@@ -171,7 +186,7 @@ async def test_a_completion_error_surfaces_as_502_not_a_stored_run(
     assert count == 0
 
 
-async def test_scan_for_an_unknown_slug_is_404(client_factory) -> None:
+async def test_scan_for_an_unknown_slug_is_404(client_factory: ClientFactory) -> None:
     async with client_factory(FakeCompletions()) as client:
         res = await client.post("/api/scans", json={"slug": "does-not-exist"})
     assert res.status_code == 404

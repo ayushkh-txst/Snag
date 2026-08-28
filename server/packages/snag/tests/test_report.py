@@ -6,8 +6,14 @@ and the fixture invariant that a rule with breaks > 0 has a stored run.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+
+import httpx
 
 from substrate.llm import CompletionResponse, FakeCompletions, StopReason, TokenUsage
+
+ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]
 
 SYSTEM_PROMPT = (
     "You are Ada, a support bot.\n"
@@ -35,7 +41,7 @@ EXTRACTION_JSON = json.dumps(
 
 
 async def test_report_matches_the_ui_example_shape_and_the_fixture_invariant(
-    client_factory,
+    client_factory: ClientFactory,
 ) -> None:
     fake = FakeCompletions(
         responses=[
@@ -120,7 +126,7 @@ async def test_report_matches_the_ui_example_shape_and_the_fixture_invariant(
     assert len(report["history"]) >= 1
 
 
-async def test_report_for_an_unknown_slug_is_404(client_factory) -> None:
+async def test_report_for_an_unknown_slug_is_404(client_factory: ClientFactory) -> None:
     async with client_factory(FakeCompletions()) as client:
         res = await client.get("/api/projects/does-not-exist/report")
     assert res.status_code == 404

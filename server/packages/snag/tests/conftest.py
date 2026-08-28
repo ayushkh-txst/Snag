@@ -34,14 +34,17 @@ async def running_app(fake: FakeCompletions) -> AsyncIterator[httpx.AsyncClient]
     app = create_app()
     app.dependency_overrides[get_completions] = lambda: fake
     transport = httpx.ASGITransport(app=app)
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            yield client
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=transport, base_url="http://testserver") as client,
+    ):
+        yield client
+
+
+ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]
 
 
 @pytest.fixture
-def client_factory() -> Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]:
+def client_factory() -> ClientFactory:
     """`async with client_factory(fake) as client: ...` — see `running_app`."""
     return running_app

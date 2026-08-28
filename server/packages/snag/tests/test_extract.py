@@ -7,8 +7,15 @@ own system instruction.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 
+import httpx
+
+from substrate.db import Database
 from substrate.llm import CompletionResponse, FakeCompletions, StopReason, TokenUsage
+
+ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]
 
 SYSTEM_PROMPT = (
     "You are Ada, a support bot.\n"
@@ -48,7 +55,9 @@ def _fake_extraction() -> FakeCompletions:
     )
 
 
-async def test_create_project_extracts_and_persists_one_rule(client_factory, clean_db) -> None:
+async def test_create_project_extracts_and_persists_one_rule(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
     fake = _fake_extraction()
     async with client_factory(fake) as client:
         res = await client.post(
@@ -67,7 +76,7 @@ async def test_create_project_extracts_and_persists_one_rule(client_factory, cle
 
 
 async def test_the_pasted_prompt_travels_as_data_never_as_the_extractors_own_instruction(
-    client_factory, clean_db
+    client_factory: ClientFactory, clean_db: Database
 ) -> None:
     fake = _fake_extraction()
     async with client_factory(fake) as client:
@@ -80,12 +89,10 @@ async def test_the_pasted_prompt_travels_as_data_never_as_the_extractors_own_ins
 
 
 async def test_oversized_system_prompt_is_rejected_before_any_model_call(
-    client_factory, clean_db
+    client_factory: ClientFactory,
 ) -> None:
     fake = _fake_extraction()
     async with client_factory(fake) as client:
-        res = await client.post(
-            "/api/projects", json={"system_prompt": "x" * 20_001}
-        )
+        res = await client.post("/api/projects", json={"system_prompt": "x" * 20_001})
     assert res.status_code == 422
     assert fake.calls == []

@@ -40,6 +40,7 @@ site (T-13-01).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -55,6 +56,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUE_BY_ID, Technique
 from snag.checkers import run_checker
+from snag.checkers.flow import _DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
 from snag.cost import estimate_scan_cost
 from snag.gaps import GAP_CHECKLIST, persist_gap, probe_gap
@@ -349,9 +351,28 @@ def _effective_checker_config(rule: Any, attack: Attack, setup: _ScanSetup) -> d
     if setup.translations:
         config.setdefault("translations", setup.translations)
     if setup.refusal_markers:
-        config.setdefault("refusal_markers", setup.refusal_markers)
+        # UNION with checkers.flow's own hardcoded defaults, never a
+        # replacement (01-15, found against a live model): a marker
+        # `_generate_refusal_markers` invents is a whole invented sentence
+        # ("i can't provide that assistance") that almost never appears
+        # verbatim in a reply refusing something topic-specific ("i can't
+        # provide tax or legal advice") — real refusals matched the short,
+        # generic defaults (flow.py's own `_DEFAULT_REFUSAL_MARKERS`) far
+        # more reliably than anything this setup call generates. A rule
+        # that already set its own explicit `refusal_markers` is still
+        # respected untouched (`setdefault` below only fires when absent).
+        config.setdefault("refusal_markers", [*_DEFAULT_REFUSAL_MARKERS, *setup.refusal_markers])
     if attack.canary:
         config["canary"] = attack.canary
+    # A structural fact about THIS attack, not a user-editable config value
+    # (never `setdefault` — always the true answer for this dispatch):
+    # only a TOOL_ABUSE_KIND attack ever offers `tools` to the model
+    # (`tools_for_attack` in `_run_scan`'s loop). INDIRECT never does — its
+    # own synthetic tool_call/tool_result pair (`_execute_indirect_attack`)
+    # represents data the harness constructs, not a call the model made —
+    # `checkers.flow._state_changed`/`refusal_expected` need this to avoid
+    # reading that pair as "the model fired a tool" (01-15).
+    config["tools_offered"] = attack.surface_kind == TOOL_ABUSE_KIND
     return config
 
 
@@ -918,7 +939,27 @@ async def _run_scan(
                 )
                 continue
 
-            result = run_checker(rule["checker_type"], transcript, checker_config)
+            try:
+                result = run_checker(rule["checker_type"], transcript, checker_config)
+            except (KeyError, TypeError, ValueError, re.error) as exc:
+                # A rule's checker_config can be malformed or missing a key
+                # its own checker_type requires — extraction (LLM-first, no
+                # provider-enforced json_schema) or a hand-typed rule can
+                # both produce a checker_type/checker_config pairing that
+                # doesn't line up (e.g. `tool_call_order` needs `tool_a`/
+                # `tool_b`; a config missing either used to KeyError the
+                # entire scan). Same isolation discipline as the
+                # CompletionError branch above: one attack's config problem
+                # must not lose every other already-completed and
+                # yet-to-run attack in the scan.
+                log.warning(
+                    "scan.checker_config_mismatch",
+                    scan_id=scan_id,
+                    attack=attack.key(),
+                    checker_type=rule["checker_type"],
+                    error=repr(exc),
+                )
+                continue
             broke = not result.passed
 
             async with db.acquire() as conn:

@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from snag.api.app import ctx
-from snag.api.deps import get_completions, require_slug, validate_model
+from snag.api.deps import get_completions, require_mutable_slug, require_slug, validate_model
 from snag.followups import Normalized, group_open_questions, normalize_answer
 from substrate.llm import Completions
 
@@ -160,7 +160,17 @@ async def _apply_normalized(
     normalized: Normalized,
 ) -> None:
     """Persist the normalized answer onto the question row, and — only when
-    the answer is usable — the literal config onto the rule (FOLLOWUP-02).
+    the answer is usable — MERGE the literal config onto the rule
+    (FOLLOWUP-02). A rule commonly raises more than one open question in
+    the same round (found seeding 01-15's real corpus: extraction split
+    "which credential formats" and "should examples be exempt" into two
+    separate questions on one rule) — a plain overwrite here would let the
+    second answer silently erase the first's contribution to
+    checker_config, exactly backwards from "the literal config that will
+    always be shown back." The jsonb `||` merge keeps every key both
+    answers contributed; a key both happen to name is decided by whichever
+    was applied last, same as a dict's own `.update()`.
+
     A skip marks the rule untestable; a conflict touches neither the rule's
     checker_config nor its testable flag, since nothing was resolved
     (T-08-02: never silently pick a side)."""
@@ -176,7 +186,8 @@ async def _apply_normalized(
     )
     if normalized.status in ("answered", "inferred"):
         await conn.execute(
-            "UPDATE rules SET checker_config = $1 WHERE id = $2",
+            """UPDATE rules SET checker_config = COALESCE(checker_config, '{}'::jsonb) || $1
+               WHERE id = $2""",
             normalized.checker_config,
             rule_id,
         )
@@ -191,7 +202,7 @@ async def answer_questions(
     request: Request,
     completions: Completions = Depends(get_completions),  # noqa: B008 - FastAPI DI idiom
 ) -> AnswersResponse:
-    project = await require_slug(request, slug)
+    project = await require_mutable_slug(request, slug)  # T-15-01
     state = ctx(request)
     model = project["model"]
     validate_model(model)  # KEY-03: before any completions call, even on a re-answer

@@ -133,6 +133,32 @@ def _attack_surface(surface_id: int, *, kind: SurfaceKind, path: str) -> AttackS
     return AttackSurface(id=str(surface_id), kind=kind, path=path)
 
 
+def test_effective_checker_config_unions_setup_markers_with_the_hardcoded_defaults() -> None:
+    """01-15: `_generate_refusal_markers` invents whole sentences ("i can't
+    provide that assistance") that almost never appear verbatim in a reply
+    refusing something topic-specific ("i can't provide tax or legal
+    advice") — found seeding the corpus against a live model, where a
+    genuine, textbook refusal still failed `refused` because the setup
+    markers had REPLACED the short, generic, reliably-matching
+    `_DEFAULT_REFUSAL_MARKERS` instead of joining them."""
+    rule = {"checker_config": {}}
+    attack = Attack(
+        rule_id="1",
+        surface_id="1",
+        technique_id="refusal_bypass.01",
+        family="refusal_bypass",
+        surface_kind="chat",
+        prompt_or_turns="ask",
+        canary=None,
+        direction="negative",
+    )
+    setup = runner._ScanSetup(refusal_markers=["i can't provide that assistance."])
+    config = runner._effective_checker_config(rule, attack, setup)
+    markers = config["refusal_markers"]
+    assert "i can't" in markers  # the reliable default survives
+    assert "i can't provide that assistance." in markers  # setup's own addition is kept too
+
+
 # --------------------------------------------------------------------- Task 1
 # (enqueue / estimate / endpoint)
 
@@ -436,6 +462,70 @@ async def test_scan_handler_persists_a_refusal_as_a_normal_run_not_an_error(
         runs = await conn.fetch("SELECT * FROM attack_runs WHERE scan_id = $1", scan_id)
     assert len(runs) == len(expected)
     assert all(r["passed"] is True for r in runs)  # empty text never contains the forbidden string
+
+
+async def test_a_checker_config_mismatch_skips_that_attack_without_failing_the_scan(
+    client_factory: ClientFactory, clean_db: Database, drain_scan_queue: DrainScanQueue
+) -> None:
+    """01-15: a real extraction pass assigned `checker_type='tool_call_order'`
+    to a rule whose `checker_config` never got `tool_a`/`tool_b` filled in —
+    `config["tool_a"]` used to KeyError and take the ENTIRE scan down with
+    it (a live-model finding, not a hypothetical). One rule's mismatched
+    config must only cost that rule's own attacks, exactly like a transient
+    `CompletionError` costs only the one attack it interrupts."""
+    fake = FakeCompletions()
+    slug = "proj-checker-mismatch"
+    await _make_project(clean_db, slug=slug)
+    broken_rule_id = await _add_rule(
+        clean_db,
+        slug,
+        category="content_prohibition",
+        checker_type="tool_call_order",
+        checker_config=None,  # missing the tool_a/tool_b this checker requires
+    )
+    fine_rule_id = await _add_rule(
+        clean_db,
+        slug,
+        category="tone_style",
+        checker_type="forbidden_text",
+        checker_config={"strings": ["nope-never-matches-xyz"]},
+    )
+    chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
+
+    expected = instantiate(
+        [
+            _attack_rule(broken_rule_id, "content_prohibition"),
+            _attack_rule(fine_rule_id, "tone_style"),
+        ],
+        [_attack_surface(chat_id, kind="chat", path="user message")],
+    )
+    broken_count = len(
+        instantiate(
+            [_attack_rule(broken_rule_id, "content_prohibition")],
+            [_attack_surface(chat_id, kind="chat", path="user message")],
+        )
+    )
+    assert broken_count > 0 and len(expected) > broken_count  # both rules actually attacked
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
+    )
+
+    async with client_factory(fake) as client:
+        res = await client.post(
+            "/api/scans", json={"slug": slug, "mode": "custom", "surfaces": ["direct"], "repeats": 1}
+        )
+        scan_id = res.json()["scan_id"]
+        worker = await drain_scan_queue(clean_db, fake)
+        got = await client.get(f"/api/scans/{scan_id}")
+
+    assert worker.failed == 0
+    assert got.json()["status"] == "completed"
+    async with clean_db.acquire() as conn:
+        runs = await conn.fetch("SELECT * FROM attack_runs WHERE scan_id = $1", scan_id)
+    rule_ids_persisted = {r["rule_id"] for r in runs}
+    assert broken_rule_id not in rule_ids_persisted  # skipped, not crashed
+    assert fine_rule_id in rule_ids_persisted  # unaffected by the other rule's bad config
+    assert len(runs) == len(expected) - broken_count
 
 
 async def test_technique_stats_persist_counts_only_and_never_prompt_text(

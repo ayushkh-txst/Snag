@@ -345,6 +345,96 @@ async def test_post_endpoint_normalizes_persists_config_and_shows_it_back(
     assert question_row["answer_raw"] == "$200"
 
 
+async def test_post_endpoint_merges_two_answers_on_the_same_rule_instead_of_overwriting(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    """01-15: a real extraction pass commonly raises MORE THAN ONE open
+    question on a single rule (found seeding the example corpus for
+    real — e.g. "which credential formats?" and "should test fixtures be
+    exempt?" on the same secret-leak rule). Answering both must merge into
+    one checker_config; a plain overwrite used to let the second answer
+    silently erase the first's contribution."""
+    slug = "proj-followups-merge"
+    async with clean_db.acquire() as conn, conn.transaction():
+        await conn.execute("INSERT INTO projects (id, model) VALUES ($1, $2)", slug, MODEL)
+        await conn.execute(
+            "INSERT INTO prompt_versions (project_id, full_text) VALUES ($1, $2)",
+            slug,
+            SYSTEM_PROMPT,
+        )
+        rule_id = await conn.fetchval(
+            """INSERT INTO rules (project_id, text, category, direction, source_line,
+                                  checker_type, testable, confidence)
+               VALUES ($1, 'No secrets', 'secret_protection', 'negative', 'Never leak secrets',
+                       'no_secret_leak', true, 0.7)
+               RETURNING id""",
+            slug,
+        )
+        q1 = await conn.fetchval(
+            """INSERT INTO questions (rule_id, project_id, round, text, status)
+               VALUES ($1, $2, 1, 'Which credential formats?', 'open') RETURNING id""",
+            rule_id,
+            slug,
+        )
+        q2 = await conn.fetchval(
+            """INSERT INTO questions (rule_id, project_id, round, text, status)
+               VALUES ($1, $2, 1, 'Should test fixtures be exempt?', 'open') RETURNING id""",
+            rule_id,
+            slug,
+        )
+
+    fake = FakeCompletions(
+        responses=[
+            CompletionResponse(
+                text=json.dumps(
+                    {
+                        "status": "answered",
+                        "checker_config": {"patterns": ["AKIA[0-9A-Z]{16}"]},
+                        "conflict_note": "",
+                        "follow_up_questions": [],
+                    }
+                ),
+                usage=TokenUsage(80, 30),
+                stop_reason=StopReason.END_TURN,
+                model=MODEL,
+            ),
+            CompletionResponse(
+                text=json.dumps(
+                    {
+                        "status": "answered",
+                        "checker_config": {"exemptions": ["fixtures"]},
+                        "conflict_note": "",
+                        "follow_up_questions": [],
+                    }
+                ),
+                usage=TokenUsage(80, 30),
+                stop_reason=StopReason.END_TURN,
+                model=MODEL,
+            ),
+        ]
+    )
+
+    async with client_factory(fake) as client:
+        res = await client.post(
+            f"/api/projects/{slug}/questions/answers",
+            json={
+                "answers": [
+                    {"question_id": q1, "answer_raw": "AKIA keys"},
+                    {"question_id": q2, "answer_raw": "yes, exempt fixtures"},
+                ]
+            },
+        )
+    assert res.status_code == 200, res.text
+
+    async with clean_db.acquire() as conn:
+        rule_row = await conn.fetchrow("SELECT * FROM rules WHERE id = $1", rule_id)
+    assert rule_row is not None
+    assert rule_row["checker_config"] == {
+        "patterns": ["AKIA[0-9A-Z]{16}"],
+        "exemptions": ["fixtures"],
+    }
+
+
 async def test_post_endpoint_skip_marks_rule_untestable(
     client_factory: ClientFactory, clean_db: Database
 ) -> None:

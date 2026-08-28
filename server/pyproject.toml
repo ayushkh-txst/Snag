@@ -1,0 +1,83 @@
+[project]
+name = "snag-workspace"
+version = "0.0.0"
+description = "Snag — paste a system prompt and tool definitions, find out what breaks them."
+requires-python = ">=3.12"
+dependencies = ["snag", "substrate"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+snag = { workspace = true }
+substrate = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+# ---------------------------------------------------------------- ruff
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/substrate/src", "packages/snag/src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes — real bugs
+    "I",        # import sorting
+    "UP",       # pyupgrade — don't write 3.8 in 3.12
+    "B",        # bugbear — mutable defaults, loop-variable capture
+    "C4",       # comprehension rewrites
+    "SIM",      # simplifications
+    "ASYNC",    # blocking calls inside async def
+    "S",        # bandit — security
+    "ANN",      # missing annotations
+    "RUF",
+]
+ignore = [
+    "ANN401",   # allow Any where it's genuinely Any (JSON payloads)
+    "S101",     # assert is fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"packages/*/tests/**" = ["S", "ANN", "PLR2004"]
+"alembic/**" = ["ANN", "E501", "I"]
+
+# ---------------------------------------------------------------- mypy
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = "packages/substrate/src:packages/snag/src"
+files = [
+    "packages/substrate/src", "packages/substrate/tests",
+    "packages/snag/src", "packages/snag/tests",
+]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["packages/substrate/tests", "packages/snag/tests"]
+addopts = "-q --strict-markers --import-mode=importlib"
+markers = [
+    "integration: needs a live Postgres (run local Postgres first)",
+]

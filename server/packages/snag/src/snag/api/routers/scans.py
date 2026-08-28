@@ -42,18 +42,21 @@ def _attack_prompt(rule_text: str) -> str:
 
 
 def _forbidden_terms(
-    checker_config: dict[str, Any] | None, source_line: str, text: str
+    checker_config: dict[str, Any] | None, source_line: str, text: str, checker_type: str = ""
 ) -> list[str]:
-    """Terms whose presence in a reply means the rule broke. Prefers
-    checker_config['strings'] when the extractor populated one
-    (forbidden_text/forbidden_pattern-shaped rules); otherwise falls back to
-    the rule's own source line — the tracer runs one generic forbidden-text
-    check regardless of checker_type (01-06 replaces this with the full
-    registry)."""
+    """Terms whose presence in a reply means the rule broke. `checker_config`
+    is extractor-produced free-form JSON (extract.py's schema does not pin
+    down key names — see RULES_JSON_SCHEMA), so the model names the list key
+    after whatever seems natural. In practice that is usually the
+    checker_type itself (e.g. `{"forbidden_text": ["banana"]}`), occasionally
+    the generic 'strings'; try both before falling back to the rule's own
+    source line — the tracer runs one generic forbidden-text check regardless
+    of checker_type (01-06 replaces this with the full registry)."""
     cfg = checker_config or {}
-    strings = cfg.get("strings")
-    if isinstance(strings, list) and strings:
-        return [str(s) for s in strings if str(s).strip()]
+    for key in ("strings", checker_type):
+        candidate = cfg.get(key) if key else None
+        if isinstance(candidate, list) and candidate:
+            return [str(s) for s in candidate if str(s).strip()]
     snippet = (source_line or text or "").strip()
     return [snippet] if snippet else []
 
@@ -141,7 +144,9 @@ async def start_scan(
         )
     )
 
-    terms = _forbidden_terms(rule["checker_config"], rule["source_line"], rule["text"])
+    terms = _forbidden_terms(
+        rule["checker_config"], rule["source_line"], rule["text"], rule["checker_type"]
+    )
     passed, checker_output, evidence = _run_forbidden_text_check(response.text, terms)
 
     conversation: list[dict[str, Any]] = [

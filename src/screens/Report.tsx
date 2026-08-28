@@ -1,10 +1,11 @@
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { ApiError, getReport } from "../api/client";
 import { StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
 import { Arrow, Coverage, Pill } from "../components/ui";
 import {
   breakInput,
-  byslug,
   checkerPlain,
   coverage,
   surfaceTitle,
@@ -65,7 +66,53 @@ function BrokenRule({ ex, rule, i }: { ex: Example; rule: Rule; i: number }) {
 
 export function Report() {
   const { slug } = useParams();
-  const ex = byslug(slug);
+  const [ex, setEx] = useState<Example | null>(null);
+  const [error, setError] = useState<ApiError | Error | null>(null);
+
+  useEffect(() => {
+    if (!slug) return;
+    let cancelled = false;
+    setEx(null);
+    setError(null);
+    getReport(slug)
+      .then((data) => {
+        if (!cancelled) setEx(data);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err : new Error(String(err)));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  if (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return (
+        <section className="panel">
+          <p>No report found for “{slug}”. The project may not exist, or nothing has been scanned yet.</p>
+        </section>
+      );
+    }
+    return (
+      <section className="panel">
+        <p>Couldn't load this report: {error.message}</p>
+      </section>
+    );
+  }
+
+  if (!ex) {
+    return (
+      <section className="panel">
+        <p>Loading report…</p>
+      </section>
+    );
+  }
+
+  return <ReportBody ex={ex} />;
+}
+
+function ReportBody({ ex }: { ex: Example }) {
   const c = coverage(ex);
   const t = tally(ex);
 

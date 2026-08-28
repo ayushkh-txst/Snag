@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
+import { addRule, deleteRule, patchRule } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { Coverage } from "../components/ui";
 import { useProject } from "../hooks/useProject";
 import { CATEGORY_LABEL, checkerPlain, type Rule } from "../data";
-
-type EditableRule = Rule & { addedByUser?: boolean };
 
 function SourcePane({ prompt, active }: { prompt: string; active?: string }) {
   const lines = prompt.split("\n");
@@ -35,10 +34,11 @@ function SourcePane({ prompt, active }: { prompt: string; active?: string }) {
 
 export function Rules() {
   const { slug } = useParams();
-  const { data: ex, loading, error, notFound } = useProject(slug);
-  const [rules, setRules] = useState<EditableRule[]>([]);
+  const { data: ex, loading, error, notFound, refetch } = useProject(slug);
+  const [rules, setRules] = useState<Rule[]>([]);
   const [active, setActive] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (ex) setRules(ex.rules);
@@ -56,27 +56,48 @@ export function Rules() {
 
   const needsDetail = (id: string) => ex.questions.some((q) => q.ruleId === id);
 
-  const addRule = () => {
+  const markPending = (id: string, on: boolean) =>
+    setPending((p) => {
+      const next = new Set(p);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  const toggleTestable = (r: Rule) => {
+    if (!slug) return;
+    const next = !r.testable;
+    setRules((rs) => rs.map((x) => (x.id === r.id ? { ...x, testable: next } : x)));
+    markPending(r.id, true);
+    patchRule(slug, r.id, { testable: next })
+      .then((updated) => {
+        setRules((rs) => rs.map((x) => (x.id === r.id ? updated : x)));
+      })
+      .catch(() => {
+        setRules((rs) => rs.map((x) => (x.id === r.id ? { ...x, testable: !next } : x)));
+      })
+      .finally(() => markPending(r.id, false));
+  };
+
+  const removeRule = (r: Rule) => {
+    if (!slug) return;
+    const prev = rules;
+    setRules((rs) => rs.filter((x) => x.id !== r.id));
+    deleteRule(slug, r.id).catch(() => {
+      setRules(prev);
+    });
+  };
+
+  const addRuleFromDraft = () => {
+    if (!slug) return;
     const text = draft.trim();
     if (!text) return;
-    setRules((rs) => [
-      ...rs,
-      {
-        id: `you-${Date.now()}`,
-        text,
-        category: "other",
-        direction: "negative",
-        sourceLine: "",
-        checkerType: "forbidden_text",
-        checkerConfig: {},
-        testable: true,
-        confidence: 1,
-        attacks: 0,
-        breaks: 0,
-        addedByUser: true,
-      },
-    ]);
     setDraft("");
+    addRule(slug, { text })
+      .then((created) => {
+        setRules((rs) => [...rs, created]);
+      })
+      .catch(() => void refetch());
   };
 
   return (
@@ -104,11 +125,8 @@ export function Rules() {
                     type="checkbox"
                     className="rule__box"
                     checked={r.testable}
-                    onChange={() =>
-                      setRules((rs) =>
-                        rs.map((x) => (x.id === r.id ? { ...x, testable: !x.testable } : x)),
-                      )
-                    }
+                    disabled={pending.has(r.id)}
+                    onChange={() => toggleTestable(r)}
                   />
                   <span className="rule__body">
                     <span className="rule__n mono">{String(i + 1).padStart(2, "0")}</span>
@@ -128,7 +146,7 @@ export function Rules() {
                       {r.testable && needsDetail(r.id) && (
                         <span className="chip" data-tone="eyes">needs one detail</span>
                       )}
-                      {r.addedByUser && <span className="chip" data-tone="eyes">not in your prompt</span>}
+                      {r.inPrompt === false && <span className="chip" data-tone="eyes">not in your prompt</span>}
                     </span>
                   </span>
                   <button
@@ -136,7 +154,7 @@ export function Rules() {
                     aria-label={`Remove rule ${i + 1}`}
                     onClick={(e) => {
                       e.preventDefault();
-                      setRules((rs) => rs.filter((x) => x.id !== r.id));
+                      removeRule(r);
                     }}
                   >
                     ×
@@ -150,7 +168,7 @@ export function Rules() {
             className="addrule"
             onSubmit={(e) => {
               e.preventDefault();
-              addRule();
+              addRuleFromDraft();
             }}
           >
             <input
@@ -164,8 +182,8 @@ export function Rules() {
             </button>
           </form>
           <p className="addrule__note dim">
-            A rule you add won't be in your prompt. Snag tests the behaviour anyway and
-            marks it, so you can see whether the model does the right thing by accident.
+            A rule you add won't be in your prompt. Snag marks it so you can see it wasn't
+            extracted from your text, and add a checker for it yourself if it needs one.
           </p>
         </div>
       </div>

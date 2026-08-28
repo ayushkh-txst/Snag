@@ -48,6 +48,13 @@ export interface Rule {
   plain?: string;
   /** Set when checkerType is 'none' — why code can't test it. */
   untestableReason?: string;
+  /**
+   * 01-17: whether the extractor actually found this rule in the pasted
+   * prompt, vs. a rule the user typed in themselves (EXTRACT-03) — the real
+   * source of Rules.tsx's "not in your prompt" chip, replacing a
+   * client-only flag that a page refresh would silently lose.
+   */
+  inPrompt?: boolean;
 }
 
 export interface Surface {

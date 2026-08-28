@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, getBreak } from "../api/client";
+import { ApiError, getBreak, markFalsePositive } from "../api/client";
 import { Marked, Pill } from "../components/ui";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
@@ -175,7 +175,16 @@ export function BreakDetail() {
               the right thing here and the checker misread it, say so.
             </p>
             <label className="check">
-              <input type="checkbox" checked={fp} onChange={(e) => setFp(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={fp}
+                onChange={(e) => {
+                  const value = e.target.checked;
+                  setFp(value);
+                  if (!slug || !breakId) return;
+                  markFalsePositive(slug, breakId, value).catch(() => setFp(!value));
+                }}
+              />
               <span>
                 <strong>Not a real break.</strong> Comes out of the rate, and out of every
                 rescan.

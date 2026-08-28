@@ -1,19 +1,44 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
+import { applyFix } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
 
+interface VerifyResult {
+  beforeBreaks: number;
+  afterBreaks: number;
+}
+
 export function Fixes() {
   const { slug } = useParams();
   const { data: ex, loading, error, notFound } = useProject(slug);
   const [applied, setApplied] = useState<string[]>([]);
+  const [results, setResults] = useState<Record<string, VerifyResult>>({});
+  const [pending, setPending] = useState<string | null>(null);
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
 
   if (loading) return <Loading label="Loading fixes…" />;
   if (notFound) return <NotFound slug={slug} />;
   if (error) return <ErrorState error={error} />;
   if (!ex) return <Loading label="Loading fixes…" />;
+
+  const apply = (fixId: string) => {
+    if (!slug || pending) return;
+    setPending(fixId);
+    setFailed((f) => ({ ...f, [fixId]: false }));
+    applyFix(slug, fixId)
+      .then((res) => {
+        setResults((r) => ({
+          ...r,
+          [fixId]: { beforeBreaks: res.beforeBreaks, afterBreaks: res.afterBreaks },
+        }));
+        setApplied((a) => (a.includes(fixId) ? a : [...a, fixId]));
+      })
+      .catch(() => setFailed((f) => ({ ...f, [fixId]: true })))
+      .finally(() => setPending(null));
+  };
 
   if (ex.fixes.length === 0) {
     return (
@@ -56,6 +81,8 @@ export function Fixes() {
         {ex.fixes.map((f, i) => {
           const rule = ex.rules.find((r) => r.id === f.ruleId)!;
           const on = applied.includes(f.id);
+          const result = results[f.id];
+          const busy = pending === f.id;
           return (
             <article className="fix" key={f.id} data-on={on || undefined}>
               <header className="fix__head">
@@ -69,11 +96,10 @@ export function Fixes() {
                 <button
                   className="btn"
                   data-variant={on ? "ghost" : "solid"}
-                  onClick={() =>
-                    setApplied((a) => (on ? a.filter((x) => x !== f.id) : [...a, f.id]))
-                  }
+                  disabled={busy || on}
+                  onClick={() => apply(f.id)}
                 >
-                  {on ? "Applied — undo" : "Apply and verify"}
+                  {busy ? "Applying…" : on ? "Applied" : "Apply and verify"}
                 </button>
               </header>
 
@@ -94,10 +120,14 @@ export function Fixes() {
 
               <p className="fix__why">{f.rationale}</p>
 
+              {failed[f.id] && <p className="dim">Couldn't apply that fix — try again.</p>}
+
               <div className="verify" data-on={on || undefined}>
                 <div className="verify__side">
                   <span className="label">before</span>
-                  <span className="verify__v mono" data-tone="snagged">{f.before}</span>
+                  <span className="verify__v mono" data-tone="snagged">
+                    {result ? `${result.beforeBreaks} broke` : `${rule.breaks} broke`}
+                  </span>
                 </div>
                 <div className="verify__arrow" aria-hidden="true">
                   <svg width="34" height="10" viewBox="0 0 34 10">
@@ -107,7 +137,7 @@ export function Fixes() {
                 <div className="verify__side">
                   <span className="label">after the edit, rerun</span>
                   <span className="verify__v mono" data-tone={on ? "held" : undefined}>
-                    {on ? f.after : "not run yet"}
+                    {on && result ? `${result.afterBreaks} of ${result.beforeBreaks} still broke` : "not run yet"}
                   </span>
                 </div>
                 <p className="verify__note dim">

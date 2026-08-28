@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import { generateSurfaces, toggleSurface } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
@@ -16,10 +17,45 @@ export function Surfaces() {
   const { slug } = useParams();
   const { data: ex, loading, error, notFound } = useProject(slug);
   const [surfaces, setSurfaces] = useState<Surface[]>([]);
+  const confirmedOnceRef = useRef(false);
 
   useEffect(() => {
-    if (ex) setSurfaces(ex.surfaces);
-  }, [ex]);
+    if (!ex || !slug) return;
+    confirmedOnceRef.current = false;
+    let cancelled = false;
+
+    (async () => {
+      let list = ex.surfaces;
+      // A brand new project only has the always-present `chat` row until
+      // the full map is generated once — first visit to this step builds
+      // it (POST regenerates the whole map from the latest prompt/tools).
+      if (list.length <= 1) {
+        try {
+          list = await generateSurfaces(slug);
+        } catch {
+          // fall back to whatever the report already had
+        }
+      }
+      if (cancelled) return;
+      setSurfaces(list);
+
+      if (!confirmedOnceRef.current) {
+        confirmedOnceRef.current = true;
+        // SURFACE-03/the runner's own contract: a scan only ever dispatches
+        // to a surface that is BOTH confirmed and user-controlled. Reaching
+        // this step and seeing a surface's default state IS confirming it
+        // — without this, a user who never touches a checkbox would get a
+        // scan that silently attacks nothing.
+        for (const s of list) {
+          void toggleSurface(slug, s.id, { confirmed: true }).catch(() => {});
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ex, slug]);
 
   if (loading) return <Loading label="Loading surfaces…" />;
   if (notFound) return <NotFound slug={slug} />;
@@ -30,10 +66,16 @@ export function Surfaces() {
   const total = on.reduce((n, s) => n + s.tests, 0);
   const slots = surfaces.filter((s) => s.kind === "template_var");
 
-  const toggle = (id: string) =>
-    setSurfaces((xs) =>
-      xs.map((x) => (x.id === id ? { ...x, userControlled: !x.userControlled } : x)),
-    );
+  const toggle = (id: string) => {
+    if (!slug) return;
+    const target = surfaces.find((s) => s.id === id);
+    if (!target) return;
+    const next = !target.userControlled;
+    setSurfaces((xs) => xs.map((x) => (x.id === id ? { ...x, userControlled: next } : x)));
+    toggleSurface(slug, id, { userControlled: next, confirmed: true }).catch(() => {
+      setSurfaces((xs) => xs.map((x) => (x.id === id ? { ...x, userControlled: !next } : x)));
+    });
+  };
 
   return (
     <>

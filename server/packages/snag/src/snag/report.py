@@ -100,6 +100,13 @@ def _break_id(run_ids: list[int]) -> str:
     return f"{_BREAK_ID_PREFIX}{min(run_ids)}"
 
 
+def _parse_break_id(break_id: str) -> int | None:
+    if not break_id.startswith(_BREAK_ID_PREFIX):
+        return None
+    rest = break_id[len(_BREAK_ID_PREFIX) :]
+    return int(rest) if rest.isdigit() else None
+
+
 def _build_break_entry(
     key: BreakKey, runs: list[asyncpg.Record], *, excluded: bool
 ) -> dict[str, Any]:
@@ -356,3 +363,49 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         "coverage": coverage,
         "bySurface": by_surface,
     }
+
+
+async def _resolve_break_identity(conn: Any, slug: str, break_id: str) -> asyncpg.Record | None:
+    """The one `attack_runs` row `break_id` names, scoped to `slug`
+    (T-12-03: a report never leaks another project's runs) — callers use
+    its `(rule_id, surface_id, technique_id)` as the group identity and its
+    `scan_id` to know which scan's repeats to show."""
+    run_id = _parse_break_id(break_id)
+    if run_id is None:
+        return None
+    return await conn.fetchrow(
+        """SELECT ar.* FROM attack_runs ar
+           JOIN scans s ON s.id = ar.scan_id
+           WHERE ar.id = $1 AND s.project_id = $2""",
+        run_id,
+        slug,
+    )
+
+
+async def break_detail(db: Database, slug: str, break_id: str) -> dict[str, Any] | None:
+    """The full `Break` for `break_id`, `variants[]` built from every stored
+    `attack_run` of that rule/surface/technique across ALL repeat_index
+    values IN THE SAME SCAN `break_id` itself came from (BREAK-02) — `None`
+    if `break_id` doesn't resolve to a run in this project."""
+    async with db.acquire() as conn:
+        anchor = await _resolve_break_identity(conn, slug, break_id)
+        if anchor is None:
+            return None
+        runs = await conn.fetch(
+            """SELECT * FROM attack_runs
+               WHERE scan_id = $1 AND technique_id = $2
+                 AND rule_id IS NOT DISTINCT FROM $3
+                 AND surface_id IS NOT DISTINCT FROM $4
+               ORDER BY repeat_index, id""",
+            anchor["scan_id"],
+            anchor["technique_id"],
+            anchor["rule_id"],
+            anchor["surface_id"],
+        )
+        all_run_rows = await _fetch_all_runs(conn, slug)
+
+    if not runs:
+        return None
+    key = _break_key(anchor)
+    excluded = key in {_break_key(r) for r in all_run_rows if r["false_positive"]}
+    return _build_break_entry(key, list(runs), excluded=excluded)

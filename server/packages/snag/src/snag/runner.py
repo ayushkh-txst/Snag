@@ -49,6 +49,7 @@ import httpx
 import structlog
 
 from snag.api.deps import validate_model
+from snag.api.sse import write_progress
 from snag.attacks.instantiate import Attack, instantiate
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
@@ -942,18 +943,29 @@ async def _run_scan(
                     broke=broke,
                 )
                 state.attacks_done += 1
-                await conn.execute(
-                    """UPDATE scans SET call_count = $2, cost = $3,
-                           attacks_done = attacks_done + 1,
-                           breaks_found = breaks_found + $4,
-                           current_rule_id = $5, current_surface_id = $6
-                       WHERE id = $1""",
+                # PROGRESS-01: one persisted, sequenced event per attack —
+                # the runner's whole progress-write seam (`write_progress`
+                # also updates the same `scans` counters this UPDATE used to
+                # set inline; see `snag.api.sse`). The SSE stream tails
+                # `scan_events` by seq, so a refresh/reconnect resumes here.
+                await write_progress(
+                    conn,
                     scan_id,
-                    state.call_count,
-                    state.spend_total,
-                    1 if broke else 0,
-                    int(rule["id"]),
-                    int(surface["id"]),
+                    kind="attack",
+                    data={
+                        "technique_id": attack.technique_id,
+                        "rule_id": int(rule["id"]),
+                        "surface_id": int(surface["id"]),
+                        "broke": broke,
+                        "attacks_done": state.attacks_done,
+                        "cost": str(state.spend_total),
+                    },
+                    rule_id=int(rule["id"]),
+                    surface_id=int(surface["id"]),
+                    call_count=state.call_count,
+                    cost=state.spend_total,
+                    attacks_done=state.attacks_done,
+                    broke=broke,
                 )
 
     # ------------------------------------------------------------ gap probes

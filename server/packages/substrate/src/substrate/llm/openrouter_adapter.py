@@ -182,6 +182,22 @@ class OpenRouterCompletions:
             body["response_format"] = response_format
         if request.tools:
             body["tools"] = list(request.tools)
+
+        # A reasoning model asked for structured output will happily spend
+        # the whole completion budget thinking and return an empty string.
+        # Measured against qwen/qwen3.8-flash on Snag's rule extraction:
+        # reasoning_tokens == max_tokens and content == "" at 2048, 4096 AND
+        # 8192 — more budget just buys more thinking. With reasoning off it
+        # answered inside 2048. So an unset `reasoning` means "off when a
+        # schema is set": the tokens belong to the answer, not a preamble
+        # that gets discarded. An explicit True/False always wins, which is
+        # what keeps a free-form attack dispatch thinking normally — there
+        # the model's own unprompted behaviour is the thing under test.
+        reasoning = request.reasoning
+        if reasoning is None:
+            reasoning = request.json_schema is None
+        if not reasoning:
+            body["reasoning"] = {"enabled": False}
         return body
 
     def _to_response(

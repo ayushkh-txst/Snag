@@ -126,6 +126,25 @@ class CompletionRequest:
     512-token minimum. Below that minimum nothing caches and no error is
     raised — you simply pay full price forever and wonder why."""
 
+    reasoning: bool | None = None
+    """Whether the provider may spend tokens on a thinking pass first.
+
+    `None` — the default — means "let the adapter decide", and the adapter's
+    rule is: disable reasoning whenever `json_schema` is set. Found the hard
+    way against `qwen/qwen3.8-flash`, which is a reasoning model: asked for
+    the rule-extraction JSON it spent its ENTIRE completion budget thinking
+    and returned an empty string, with `finish_reason="length"` and
+    `reasoning_tokens` equal to `max_tokens`. Raising the budget does not
+    help — measured at 2048, 4096 and 8192, it simply thinks more and still
+    writes nothing; only turning reasoning off produced the answer. A caller
+    asking for structured output wants the tokens spent on the answer, not
+    on a preamble it will throw away.
+
+    Set explicitly to keep reasoning on for a structured call, or to force it
+    off for a free-form one. Left alone for an ordinary free-form call it
+    stays on, which matters when the model's own unprompted behaviour is the
+    thing under test."""
+
     run_id: str = "adhoc"
     """Which run to bill this to. On the request rather than as a keyword
     argument to `complete`, so the Protocol stays a single-parameter method

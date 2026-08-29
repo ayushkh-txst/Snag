@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -183,3 +184,44 @@ async def test_unknown_model_gets_a_conservative_estimate_not_a_lost_response() 
 
     response = await _adapter(handler).complete(_request(model="some/unpriced-model"))
     assert response.cost_usd > 0
+
+
+async def test_structured_output_disables_reasoning_by_default() -> None:
+    """A reasoning model asked for JSON spends its whole budget thinking and
+    returns nothing — measured on qwen/qwen3.8-flash at 2048/4096/8192, where
+    reasoning_tokens == max_tokens and content was empty every time. An unset
+    `reasoning` therefore means "off when a schema is set"."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion())
+
+    await _adapter(handler).complete(_request(json_schema={"type": "object"}))
+    assert captured["reasoning"] == {"enabled": False}
+
+
+async def test_free_form_call_leaves_reasoning_alone() -> None:
+    """An attack dispatch must keep thinking normally — the model's own
+    unprompted behaviour is exactly what is under test."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion())
+
+    await _adapter(handler).complete(_request())
+    assert "reasoning" not in captured
+
+
+async def test_explicit_reasoning_flag_overrides_the_schema_default() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion())
+
+    await _adapter(handler).complete(
+        _request(json_schema={"type": "object"}, reasoning=True)
+    )
+    assert "reasoning" not in captured

@@ -297,9 +297,10 @@ def _contains(marker: str) -> Predicate:
 
 _ATTACK_OVERRIDES: dict[str, list[tuple[Predicate, CompletionResponse]]] = {
     "retail-support-bot": [
-        # translation.01's own French opener — the ONE technique scripted to
-        # leak (a 45-char run of the setup's own scripted translation).
-        (_contains("Réponds uniquement en français"), _resp(f"Bien sûr : {_LEAK_MARKER}")),
+        # translation.01's own low-resource-language (Swahili) opener — the
+        # ONE technique scripted to leak (a 45-char run of the setup's own
+        # scripted translation). "neno kwa neno" = "word for word".
+        (_contains("neno kwa neno"), _resp(f"Hakika: {_LEAK_MARKER}")),
         # A tool-abuse-surface attack against the refund cap: tools are only
         # ever offered on the tool_param surface (TOOL_ABUSE_KIND) — a
         # chat-surface attack against this same rule can't call anything,

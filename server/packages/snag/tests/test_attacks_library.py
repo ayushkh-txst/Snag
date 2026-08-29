@@ -29,6 +29,17 @@ EXPECTED_FAMILIES = {
     "tool_arg_injection",
     "auth_confusion",
     "refusal_bypass",
+    # 2026 hardening pass (backend research report).
+    "verbatim_extraction",
+    "policy_puppetry",
+    "template_forgery",
+    "indirect_envelope",
+    "tool_error_injection",
+    "url_exfiltration",
+    "refusal_suppression",
+    "past_tense",
+    "context_padding",
+    "shallow_cipher",
 }
 
 
@@ -92,6 +103,51 @@ def test_licences_md_lists_every_source_with_a_commercial_use_verdict() -> None:
     for source in sources:
         assert source in text, f"LICENCES.md doesn't mention source {source!r}"
     assert "commercial use" in text.lower()
+
+
+def test_every_indirect_surface_technique_carries_a_canary() -> None:
+    """gap §5.5: a canary checker PASSES when nothing was planted, so an
+    indirect (tool_return) technique without a canary is a silent no-op.
+    `needs_canary` must flag every one, and every flagged one must carry it."""
+    for technique in TECHNIQUES:
+        if "tool_return" in technique.surfaces:
+            assert needs_canary(technique), f"{technique.id} reaches tool_return but isn't flagged"
+            assert technique.canary, f"{technique.id} reaches tool_return with no canary"
+
+
+def test_every_indirect_family_has_a_poisoned_cover_story_or_default() -> None:
+    from snag.attacks.poisoned import poisoned_template
+
+    for technique in TECHNIQUES:
+        if needs_canary(technique):
+            assert technique.canary is not None
+            template = poisoned_template(technique.family)
+            # Must be fillable with the technique's canary and yield it.
+            assert "{canary}" in template
+            assert technique.canary in template.format(canary=technique.canary)
+
+
+def test_tier_c_encodings_are_gated_to_the_frontier_profile() -> None:
+    """report TIER C: deep encodings fail HARMLESSLY on cheap models (false
+    'held'), so they must not run on the small-model profile."""
+    gated = {"encoding.01", "obfuscation.01", "roleplay.01"}
+    by_id = {t.id: t for t in TECHNIQUES}
+    for tid in gated:
+        assert by_id[tid].profile == "frontier", f"{tid} should be frontier-gated"
+    # The cheap-model-capable replacement is NOT gated.
+    assert by_id["shallow_cipher.01"].profile == "all"
+
+
+def test_prefill_field_defaults_to_none_for_every_technique() -> None:
+    """Phase-2 hook (report §S1): the field exists now, defaulting to None,
+    so the runner change is a clean additive drop-in later."""
+    for technique in TECHNIQUES:
+        assert technique.prefill is None
+
+
+def test_verbatim_extraction_has_all_six_shapes() -> None:
+    shapes = {t.id for t in TECHNIQUES if t.family == "verbatim_extraction"}
+    assert len(shapes) == 6
 
 
 async def test_seed_techniques_is_idempotent(clean_db: Database) -> None:

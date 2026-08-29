@@ -274,6 +274,10 @@ async def test_the_judge_never_originates_a_verdict_for_a_rule_with_a_checker(
         ("required_fields", {"fields": ["reply"]}),
         ("enum_value", {"field": "action", "allowed": ["refund"]}),
         ("markup_format", {"format": "markdown"}),
+        # Arithmetic/script tests: a model re-judging a character count or a
+        # letter-share ratio adds noise, never accuracy. Facts.
+        ("length_bounds", {"max_chars": 400}),
+        ("language", {"language": "en"}),
         ("none", {}),
         # Judgment checker types, but the string they hunt for is a secret
         # VALUE: the customer now has the code, and no amount of surrounding
@@ -298,8 +302,6 @@ def test_a_check_that_answers_a_question_of_fact_is_never_judged(
         ("required_text", {"strings": ["licensed provider"]}),
         ("required_pattern", {"pattern": "consult"}),
         ("refusal_expected", {"prohibited_keywords": ["diagnosis"]}),
-        ("language", {"language": "en"}),
-        ("length_bounds", {"max_chars": 400}),
     ],
 )
 def test_a_check_that_answers_a_question_of_meaning_is_judged(

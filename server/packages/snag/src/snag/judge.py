@@ -132,14 +132,18 @@ JUDGMENT_CHECKER_TYPES = frozenset(
         "forbidden_pattern",
         "required_text",
         "required_pattern",
-        "language",
-        "length_bounds",
     }
 )
 """The checkers that answer a question about MEANING, and the only ones the
 judge may cross-check. Each of these decides its question by proxy — a
-keyword list, a phrase, a regex, a script test — and misses in both
-directions when the reply says the thing a different way.
+keyword list, a phrase, a regex — and misses in both directions when the
+reply says the thing a different way.
+
+`length_bounds` and `language` were considered and left OUT on purpose:
+their questions are arithmetic (how many characters, what share of the
+letters are Latin), and a model asked to re-judge a character count adds
+nondeterministic noise without ever being more right than the count. They
+stay facts.
 
 Deliberately an allowlist, not a denylist: everything else in the registry
 is a FACT until someone decides otherwise, and a checker added later starts

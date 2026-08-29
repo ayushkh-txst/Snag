@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
 import { ErrorState, Loading, NotFound } from "../components/States";
-import { Arrow, Coverage, Pill } from "../components/ui";
+import { Arrow, Coverage, DisputedPill, Pill, TierPill } from "../components/ui";
 import { useProject } from "../hooks/useProject";
 import {
   breakInput,
@@ -11,6 +11,7 @@ import {
   coverage,
   surfaceTitle,
   tally,
+  type Break,
   type Example,
   type Rule,
 } from "../data";
@@ -101,28 +102,58 @@ function ScannedInput({ ex }: { ex: Example }) {
   );
 }
 
-function BreakRow({ ex, breakId }: { ex: Example; breakId: string }) {
-  const b = ex.breaks.find((x) => x.id === breakId)!;
+/** One finding row: a break, or a hold the judge thinks was a miss. */
+function FindingRow({ ex, entry: b }: { ex: Example; entry: Break }) {
   const input = breakInput(b);
   const surface = ex.surfaces.find((s) => s.id === b.surfaceId);
-  return (
-    <Link className="brk" to={`/e/${ex.slug}/report/${b.id}`} data-fp={b.falsePositive || undefined}>
+  const missed = b.hits === 0 && (b.flaggedHits ?? 0) > 0;
+  const rate = b.falsePositive
+    ? "you marked this a false positive"
+    : missed
+      ? `the judge reads ${b.flaggedHits} of ${b.repeats} as breaking it`
+      : `broke ${b.hits} of ${b.repeats}`;
+  const body = (
+    <>
       <div className="brk__top">
         <span className="brk__where mono">
           {input.where}
           {surface && ` · ${surfaceTitle(surface)}`}
         </span>
-        <span className="brk__rate mono">
-          {b.falsePositive ? "you marked this a false positive" : `broke ${b.hits} of ${b.repeats}`}
-        </span>
+        <span className="brk__rate mono" data-quiet={missed || undefined}>{rate}</span>
       </div>
       <p className="brk__input">“{input.text}”</p>
       <div className="brk__foot">
-        <span className="mono dimmer">{b.techniqueId}</span>
+        <span className="brk__tech">
+          <span className="mono dimmer">{b.techniqueId}</span>
+          <TierPill tier={b.verdictTier} />
+          {(b.disputed || missed) && <DisputedPill />}
+        </span>
         <span className="brk__cta">See the whole conversation <Arrow /></span>
       </div>
+    </>
+  );
+  const link = (
+    <Link className="brk" to={`/e/${ex.slug}/report/${b.id}`} data-fp={b.falsePositive || undefined}>
+      {body}
     </Link>
   );
+  if (!b.disputeQuote) return link;
+  // Dimmed only when the whole finding is in doubt. A break with three solid
+  // repeats and one disputed one still reads as a break; it just carries the
+  // judge's quote underneath.
+  return (
+    <div className="disputed" data-quiet={b.disputed || missed || undefined}>
+      {link}
+      <p className="disputed__q">
+        <span className="dimmer">the judge quoted · </span>
+        <span className="source">“{b.disputeQuote}”</span>
+      </p>
+    </div>
+  );
+}
+
+function BreakRow({ ex, breakId }: { ex: Example; breakId: string }) {
+  return <FindingRow ex={ex} entry={ex.breaks.find((x) => x.id === breakId)!} />;
 }
 
 function BrokenRule({ ex, rule, i }: { ex: Example; rule: Rule; i: number }) {
@@ -167,11 +198,17 @@ function ReportBody({ ex }: { ex: Example }) {
   const c = coverage(ex);
   const t = tally(ex);
 
+  // A rule that broke is shown whichever tier caught it — the judged ones are
+  // labelled where each break is listed, not filtered out of the page.
   const broken = ex.rules
-    .filter((r) => r.testable && r.breaks > 0)
+    .filter((r) => r.breaks > 0)
     .sort((a, b) => b.breaks / b.attacks - a.breaks / a.attacks);
   const held = ex.rules.filter((r) => r.testable && r.breaks === 0);
-  const eyes = ex.rules.filter((r) => !r.testable);
+  const eyes = ex.rules.filter((r) => !r.testable && r.breaks === 0);
+  // The two ways the checker and the judge disagreed. Neither changes a number
+  // above; both are here in full with the reasoning one click away.
+  const disputed = ex.breaks.filter((b) => b.disputed);
+  const flagged = ex.flagged ?? [];
 
   const bySurface = ex.surfaces
     .map((s) => ({
@@ -248,6 +285,46 @@ function ReportBody({ ex }: { ex: Example }) {
         </section>
       )}
 
+      {flagged.length > 0 && (
+        <section className="panel">
+          <header className="panel__head">
+            <span className="label">the judge thinks these were missed</span>
+            <div className="panel__aside"><span className="dimmer">not counted as breaks</span></div>
+          </header>
+          <p className="disputed__lede dim">
+            Nothing broke here by the checker's reading — the reply said the thing a different
+            way, and a text search only finds the words it was given. A stronger model reading
+            the same replies calls these violations. They are deliberately <strong>not</strong> in
+            any number above: a model's opinion is enough to be worth your eye, not enough to
+            count as a break.
+          </p>
+          <div className="brokelist">
+            {flagged.map((b) => (
+              <FindingRow key={b.id} ex={ex} entry={b} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {disputed.length > 0 && (
+        <section className="panel">
+          <header className="panel__head">
+            <span className="label">disputed by the judge</span>
+            <div className="panel__aside"><span className="dimmer">out of the rate, not deleted</span></div>
+          </header>
+          <p className="disputed__lede dim">
+            A checker flagged these, and a stronger model reading the same replies thinks it
+            misread them — a denial or a hypothetical counted as the real thing. They are out of
+            every number above. Nothing else was changed. Have a look and decide.
+          </p>
+          <div className="brokelist">
+            {disputed.map((b) => (
+              <FindingRow key={b.id} ex={ex} entry={b} />
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="restgrid">
         <section className="panel">
           <header className="panel__head"><span className="label">held</span></header>
@@ -268,7 +345,11 @@ function ReportBody({ ex }: { ex: Example }) {
           <ul className="quietlist">
             {eyes.map((r) => (
               <li key={r.id} data-eyes>
-                <Pill verdict="eyes">not measured</Pill>
+                {/* Still no checker — but no longer unmeasured once the judge
+                    has actually attacked it and quoted what it read. */}
+                <Pill verdict="eyes">
+                  {r.verdictTier === "judged" && r.attacks > 0 ? "judged · held" : "not measured"}
+                </Pill>
                 <span>
                   {r.text}
                   <em className="quietlist__why">{r.untestableReason}</em>

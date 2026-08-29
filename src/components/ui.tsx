@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Risk, Verdict } from "../data";
+import type { Risk, Verdict, VerdictTier } from "../data";
 
 export const VERDICT_WORD: Record<Verdict, string> = {
   held: "held",
@@ -12,6 +12,29 @@ export function Pill({ verdict, children }: { verdict: Verdict; children?: React
   return (
     <span className="pill" data-verdict={verdict}>
       {children ?? VERDICT_WORD[verdict]}
+    </span>
+  );
+}
+
+/**
+ * Says so when a model, not a checker, decided this. A mechanical verdict needs
+ * no label — it's the default and the trust anchor — so this renders nothing
+ * for one rather than adding a badge to every row on the page.
+ */
+export function TierPill({ tier }: { tier?: VerdictTier }) {
+  if (tier !== "judged") return null;
+  return (
+    <span title="No checker fits this rule, so a stronger model judged it — and had to quote the reply.">
+      <Pill verdict="eyes">judged</Pill>
+    </span>
+  );
+}
+
+/** A break a checker found and the judge, on review, thinks it misread. */
+export function DisputedPill() {
+  return (
+    <span title="A checker flagged this, and the judge thinks it misread the reply. You decide.">
+      <Pill verdict="dead">disputed</Pill>
     </span>
   );
 }

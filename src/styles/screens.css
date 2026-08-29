@@ -661,6 +661,19 @@
   font-size: var(--t-xs); line-height: 1.65; white-space: pre-wrap; word-break: break-word;
   overflow-x: auto;
 }
+.quoted { border: 1px solid var(--rule); border-radius: var(--radius); padding: var(--s4); }
+.quoted[data-disputed] { border-color: var(--dead); background: var(--dead-soft); }
+.quoted__q {
+  margin: var(--s3) 0;
+  padding: var(--s3) var(--s4);
+  background: var(--paper-2);
+  border-left: 2px solid var(--eyes);
+  font-size: var(--t-xs);
+}
+.quoted[data-disputed] .quoted__q { border-left-color: var(--dead); }
+.quoted__b { font-size: var(--t-xs); color: var(--ink-2); line-height: 1.55; }
+.quoted__why { color: var(--ink); margin-top: var(--s3); }
+
 .fpbox, .reprobox { border: 1px solid var(--rule); border-radius: var(--radius); padding: var(--s4); }
 .fpbox[data-on] { border-color: var(--dead); background: var(--dead-soft); }
 .fpbox__b { font-size: var(--t-xs); color: var(--ink-2); line-height: 1.55; margin: var(--s3) 0 var(--s4); }
@@ -973,7 +986,8 @@
   border-left: 2px solid var(--eyes);
   padding-left: var(--s3);
 }
-.brk__foot { display: flex; justify-content: space-between; gap: var(--s4); align-items: baseline; font-size: var(--t-xs); }
+.brk__foot { display: flex; justify-content: space-between; gap: var(--s4); align-items: center; font-size: var(--t-xs); }
+.brk__tech { display: inline-flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .brk__foot .mono { font-size: var(--t-xs); }
 .brk__cta { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
 .brk:hover .brk__cta { color: var(--snag); }
@@ -984,6 +998,16 @@
   .broke__rate { grid-column: 2; text-align: left; display: flex; gap: var(--s3); align-items: baseline; }
   .broke__how, .broke__list { margin-left: 0; }
 }
+
+/* a finding the checker and the judge read differently — dimmed only when the
+   whole finding is in doubt, since that is what it might turn out to be */
+.disputed__lede { font-size: var(--t-sm); line-height: 1.55; margin-bottom: var(--s4); max-width: 68ch; }
+.disputed { border-left: 2px solid var(--dead); padding-left: var(--s4); }
+.disputed[data-quiet] .brk { opacity: 0.75; }
+.disputed[data-quiet]:hover .brk { opacity: 1; }
+.brk__rate[data-quiet] { color: var(--ink-3); }
+.disputed__q { font-size: var(--t-xs); color: var(--ink-2); margin-top: var(--s2); padding-bottom: var(--s3); }
+.disputed__q .source { font-size: var(--t-xs); }
 
 .restgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s6); margin-top: var(--s7); }
 .quietlist { list-style: none; padding: 0; margin: 0; }

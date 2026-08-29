@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError, getBreak, markFalsePositive } from "../api/client";
-import { Marked, Pill } from "../components/ui";
+import { DisputedPill, Marked, Pill, TierPill } from "../components/ui";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
 import { CATEGORY_LABEL, type Break, type Turn } from "../data";
@@ -68,6 +68,15 @@ export function BreakDetail() {
   const broke = current?.broke ?? false;
   const turns = current?.turns ?? b.turns;
   const checkerOutput = current?.checkerOutput ?? b.checkerOutput;
+  const tier = current?.verdictTier ?? b.verdictTier ?? "mechanical";
+  const judged = tier === "judged";
+  // The span the verdict rests on, for this run: the judge's own quote when it
+  // originated the verdict, or the judge's counter-quote when it disputed a
+  // checker's. Both are verbatim from the reply — that is the whole contract.
+  const quote = current?.quote ?? b.quote;
+  const disputed = current?.disputed ?? false;
+  const disputeQuote = current?.disputeQuote ?? b.disputeQuote;
+  const disputeNote = current?.disputeNote ?? b.disputeNote;
   const step = (dir: 1 | -1) =>
     setRun((n) => Math.min(Math.max(n + dir, 0), outcomes.length - 1));
 
@@ -88,6 +97,8 @@ export function BreakDetail() {
             <span className="chip" data-dir={rule.direction}>
               {rule.direction === "positive" ? "must refuse" : "must not break"}
             </span>
+            <TierPill tier={tier} />
+            {disputed && <DisputedPill />}
           </div>
           <h1 className="bd__h">{rule.text}</h1>
           <p className="bd__src mono">
@@ -99,6 +110,7 @@ export function BreakDetail() {
           <div><dt>Family</dt><dd className="mono">{b.family}</dd></div>
           <div><dt>Surface</dt><dd className="mono">{surface?.path ?? "user message"}</dd></div>
           <div><dt>Rate</dt><dd className="mono">{b.hits} of {b.repeats}</dd></div>
+          <div><dt>Verdict by</dt><dd className="mono">{judged ? "a model" : "a checker"}</dd></div>
         </dl>
       </header>
 
@@ -164,11 +176,47 @@ export function BreakDetail() {
 
         <aside className="bd__side">
           <div className="checkout">
-            <p className="label">checker output · run {run + 1}</p>
+            <p className="label">
+              {judged ? "judge output" : "checker output"} · run {run + 1}
+            </p>
             <pre className="checkout__pre mono" data-held={!broke || undefined}>
               {checkerOutput}
             </pre>
           </div>
+
+          {judged && quote && (
+            <div className="quoted">
+              <p className="label">the words this verdict rests on</p>
+              <blockquote className="quoted__q source">“{quote}”</blockquote>
+              <p className="quoted__b">
+                Copied out of the reply above, character for character, and checked against it
+                before it was stored. A verdict whose quote isn't really there is thrown away —
+                so there is nothing here to take on trust.
+              </p>
+            </div>
+          )}
+
+          {disputed && (
+            <div className="quoted" data-disputed>
+              <p className="label">
+                {broke ? "the judge thinks this isn't a break" : "the judge thinks this one broke"}
+              </p>
+              {disputeNote && <p className="quoted__b quoted__why">{disputeNote}</p>}
+              {disputeQuote && (
+                <blockquote className="quoted__q source">“{disputeQuote}”</blockquote>
+              )}
+              <p className="quoted__b">
+                {broke
+                  ? `The checker is a text search, and this reply reads to a stronger model like a
+                     refusal it misread. The break is out of the rate but still here in full —
+                     nothing was deleted, and you have the last word below.`
+                  : `The checker found none of the words it was given, so it held. A stronger model
+                     reading the same reply says the rule was broken anyway. It is deliberately not
+                     counted as a break — a model's opinion isn't one — so this is here for your
+                     eye, not for the number.`}
+              </p>
+            </div>
+          )}
 
           <div className="fpbox" data-on={fp || undefined}>
             <p className="label">is this real?</p>

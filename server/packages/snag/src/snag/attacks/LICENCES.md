@@ -12,7 +12,7 @@ commercial-use verdict per source, checked before any of it reached
 | Source | Licence (as adapted from) | Commercial use permitted? | Used for |
 |---|---|---|---|
 | [garak](https://github.com/NVIDIA/garak) (NVIDIA) | Apache-2.0 | Yes | `instruction_override`, `encoding`, `payload_splitting`, `verbatim_extraction` (`sysprompt_extraction`), `policy_puppetry` (`doctor.py`), `template_forgery` (`latentinjection.injection_sep_pairs`), `url_exfiltration` (`xss`/`web_injection`) |
-| [PyRIT](https://github.com/microsoft/PyRIT) (Microsoft) | MIT | Yes | `roleplay`, `obfuscation`, `shallow_cipher` (FlipAttack converter) |
+| [PyRIT](https://github.com/microsoft/PyRIT) (Microsoft) | MIT | Yes | `roleplay`, `obfuscation`, `shallow_cipher` (FlipAttack converter), `prefill` (prefill converter), `escalation_ladder` (Crescendo orchestrator) |
 | [HackAPrompt](https://huggingface.co/datasets/hackaprompt/hackaprompt-dataset) | MIT | Yes | `continuation` |
 | [TensorTrust](https://tensortrust.ai/) | CC-BY-4.0 | Yes (attribution required for verbatim reuse — not applicable here, no verbatim text reused) | `debug_pretext` |
 | [JailbreakBench](https://github.com/JailbreakBench/jailbreakbench) | MIT | Yes | `authority_claim`, `many_shot` |

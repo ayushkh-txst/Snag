@@ -5,7 +5,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from snag.attacks.library import FAMILIES, TECHNIQUES, needs_canary
+from snag.attacks.library import (
+    FAMILIES,
+    TECHNIQUES,
+    needs_canary,
+    profile_for_model,
+    techniques_for_model,
+)
 from snag.attacks.seed_techniques import seed_techniques
 from substrate.db import Database
 
@@ -40,6 +46,9 @@ EXPECTED_FAMILIES = {
     "past_tense",
     "context_padding",
     "shallow_cipher",
+    # phase 2 of the same pass: the families that needed runner support.
+    "prefill",
+    "escalation_ladder",
 }
 
 
@@ -138,11 +147,120 @@ def test_tier_c_encodings_are_gated_to_the_frontier_profile() -> None:
     assert by_id["shallow_cipher.01"].profile == "all"
 
 
-def test_prefill_field_defaults_to_none_for_every_technique() -> None:
-    """Phase-2 hook (report §S1): the field exists now, defaulting to None,
-    so the runner change is a clean additive drop-in later."""
+# ------------------------------------------------- phase 2: S1 / S2 / gating
+
+
+def test_only_the_prefill_family_carries_a_prefill_and_every_member_has_one() -> None:
+    """report §S1. The forged assistant turn is the family's whole mechanism,
+    so a `prefill` technique without one would be an ordinary single-turn ask
+    wearing the wrong name, and a non-`prefill` technique with one would forge
+    a turn nothing documents."""
     for technique in TECHNIQUES:
-        assert technique.prefill is None
+        if technique.family == "prefill":
+            assert technique.prefill, f"{technique.id} is a prefill technique with no prefill"
+        else:
+            assert technique.prefill is None, f"{technique.id} carries an undocumented prefill"
+
+
+def test_no_prefill_ever_contains_its_own_canary() -> None:
+    """The canary must be something the MODEL emitted. Planting it in the
+    forged turn would let the attack satisfy its own checker — the exact
+    false-positive `Transcript.assistant_text()` excludes forged turns to
+    prevent, asserted here as well so the data can't drift into relying on
+    that backstop."""
+    for technique in TECHNIQUES:
+        if technique.prefill and technique.canary:
+            assert technique.canary not in technique.prefill
+
+
+def test_prefill_techniques_never_reach_the_indirect_surface() -> None:
+    """`runner._execute_indirect_attack` builds its own fixed exchange and
+    never inserts a prefill, so a `tool_return` prefill technique would be a
+    silent no-op — the forged turn would simply never be sent."""
+    for technique in TECHNIQUES:
+        if technique.prefill:
+            assert "tool_return" not in technique.surfaces
+
+
+def test_the_escalation_ladder_is_a_fixed_four_rung_script_ending_in_its_own_ask() -> None:
+    """report §S2: the ladder is fixed at four rungs with only the slots
+    varying, so generation stays deterministic. Rungs 2 and 3 must each refer
+    back to the model's OWN prior answer — that back-reference is the whole
+    mechanism (compliance accumulates, refusal precedent never does); a
+    ladder of four independent questions would just be padding again."""
+    ladders = [t for t in TECHNIQUES if t.family == "escalation_ladder"]
+    assert ladders
+    for ladder in ladders:
+        assert len(ladder.turns) == 4
+        assert ladder.turns[-1] == ladder.template
+        assert "your own answer above" in ladder.turns[1]
+        assert "you just described" in ladder.turns[2] or "that edge case" in ladder.turns[2]
+        assert "already agreed to above" in ladder.turns[3]
+        assert ladder.canary and "{canary}" in ladder.template
+
+
+def test_profile_gating_drops_frontier_only_techniques_for_a_cheap_model() -> None:
+    """report TIER C: a deep-encoding technique against a model that cannot
+    decode fails for a reason unrelated to the rule, and Snag would record a
+    false "held". Gating removes the run instead of scoring it."""
+    small = techniques_for_model("qwen/qwen3.8-flash")
+    frontier = techniques_for_model("openai/gpt-5.6-luna")
+
+    assert profile_for_model("qwen/qwen3.8-flash") == "small"
+    assert profile_for_model("deepseek/deepseek-v4-flash-0731") == "small"
+    assert profile_for_model("openai/gpt-5.6-luna") == "frontier"
+
+    small_ids = {t.id for t in small}
+    frontier_ids = {t.id for t in frontier}
+    for gated in ("encoding.01", "obfuscation.01", "roleplay.01"):
+        assert gated not in small_ids, f"{gated} is frontier-only and must not run on a cheap model"
+        assert gated in frontier_ids
+    # ...and what a cheap target actually gets is the structural set the
+    # report ranks first for it, not a thinned-out version of the same list.
+    for kept in (
+        "prefill.01",
+        "prefill.02",
+        "prefill.03",
+        "escalation_ladder.01",
+        "template_forgery.01",
+        "shallow_cipher.01",
+    ):
+        assert kept in small_ids
+    assert small_ids < frontier_ids  # a strict subset: gating only ever removes
+
+
+def test_profile_gating_is_a_predicate_not_a_model_table() -> None:
+    """An unknown model id must still produce a usable technique set — the
+    tier is inferred from the id, so a model OpenRouter adds tomorrow needs no
+    code change. Unknown falls back to `frontier` (run everything), because
+    running an inapplicable technique costs one call while skipping an
+    applicable one costs a missed break."""
+    assert profile_for_model("") == "frontier"
+    assert profile_for_model("some-vendor/brand-new-model") == "frontier"
+    assert len(techniques_for_model("some-vendor/brand-new-model")) == len(TECHNIQUES)
+    # A cheap tier is recognised by the id alone, vendor prefix irrelevant.
+    assert profile_for_model("meta-llama/llama-3.1-8b-instruct") == "small"
+
+
+def test_gating_preserves_library_order_so_instantiation_stays_byte_identical() -> None:
+    gated = techniques_for_model("qwen/qwen3.8-flash")
+    assert list(gated) == [t for t in TECHNIQUES if t in gated]
+
+
+def test_format_is_the_exactly_one_technique_fixture_category() -> None:
+    """Several runner tests (`test_budget_caps`, `test_sse`, `test_gaps`,
+    `test_surfaces_runner`, `test_report`, `test_tracer`) need a rule
+    category that matches EXACTLY ONE single-turn technique on the chat
+    surface, so their scripted response counts are exact and
+    hand-verifiable. `format` is that category — and it has to hold for the
+    profile-GATED set too, since that is what the runner instantiates. This
+    test is what stops a new technique from silently breaking six files at
+    once by picking up `format` as a target."""
+    for techniques in (TECHNIQUES, techniques_for_model("qwen/qwen3.8-flash")):
+        matches = [t for t in techniques if "format" in t.targets and "chat" in t.surfaces]
+        assert [t.id for t in matches] == ["debug_pretext.01"]
+        assert not matches[0].turns  # single-turn
+        assert matches[0].prefill is None  # one dispatch, no forged turn
 
 
 def test_verbatim_extraction_has_all_six_shapes() -> None:

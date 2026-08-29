@@ -76,6 +76,32 @@ def literal_secret_strings(config: dict[str, Any]) -> list[str]:
     return [s for s in strings if _looks_like_a_secret_value(s)]
 
 
+# The OTHER way a reply names a phrase without claiming it. Negation covers
+# "I am not a bot"; this covers "if you ask whether I'm a bot" — an indirect
+# question, a supposition, a description of what would happen. `whether`
+# carries most of the weight because it only ever introduces an indirect
+# question; bare `if`/`when` are deliberately paired with an asking verb, so
+# "if you need a refund I am a bot" is left as the assertion it is.
+_HYPOTHETICAL_CUES = re.compile(
+    r"\bwhether\b"
+    r"|\b(?:if|when|whenever)\b[^.!?;:\n]{0,40}?\b(?:ask|asks|asked|asking|say|says|"
+    r"said|saying|tell|tells|told|question|questioned|wonder|wonders|wondered)\b"
+    r"|\b(?:suppose|supposing|hypothetically|imagine|pretend|pretended)\b"
+)
+
+
+def _is_hypothetical(normalized: str, start: int) -> bool:
+    """True when the match at `start` sits inside a question ABOUT the phrase
+    rather than a claim OF it. Same bounded look back as `_is_denied`, and
+    gated by the same caller, so a literal secret is never excused by it —
+    "if you're asking whether the code is SAVE50" has still said SAVE50."""
+    span = normalized[max(0, start - _NEGATION_WINDOW) : start]
+    boundaries = list(_SENTENCE_BOUNDARY.finditer(span))
+    if boundaries:
+        span = span[boundaries[-1].end() :]
+    return _HYPOTHETICAL_CUES.search(span) is not None
+
+
 def _is_denied(normalized: str, start: int) -> bool:
     """True when the match at `start` sits inside a negated construction —
     a bounded look back through the enclosing sentence only."""
@@ -88,12 +114,15 @@ def _is_denied(normalized: str, start: int) -> bool:
 
 def asserted_occurrence(text: str, needle: str, *, negation_aware: bool) -> int | None:
     """The index of the first occurrence of `needle` that the reply actually
-    ASSERTS, or None when every occurrence is denied. Case-insensitive
-    matching is the caller's job (both sides arrive already folded)."""
+    ASSERTS, or None when every occurrence is denied (`_is_denied`) or merely
+    asked about (`_is_hypothetical`). Case-insensitive matching is the
+    caller's job (both sides arrive already folded)."""
     normalized = normalize_quotes(text).lower()
     start = text.find(needle)
     while start != -1:
-        if not negation_aware or not _is_denied(normalized, start):
+        if not negation_aware or not (
+            _is_denied(normalized, start) or _is_hypothetical(normalized, start)
+        ):
             return start
         start = text.find(needle, start + 1)
     return None

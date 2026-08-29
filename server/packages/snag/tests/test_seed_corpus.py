@@ -418,26 +418,16 @@ _ITEM_REF = re.compile(r'<item ref="([^"]+)">')
 
 
 def _judge_response(payload: str) -> CompletionResponse:
-    """TIER 2, job 1 — the rules with no mechanical checker. The corpus
-    oracle is about the PLANTED holes, every one of which has a real
-    checker, so the scripted judge quotes nothing: an unquoted verdict is
-    discarded as not-applicable (`snag.judge`), which keeps judged runs out
-    of every rate this file asserts on while still exercising the batching
-    and re-association path."""
+    """TIER 2, both jobs — the rules with no mechanical checker, and the
+    cross-check of every judgment-checker run. This file's oracle is the
+    PLANTED holes, every one of which has a real checker that catches it, so
+    the scripted judge quotes nothing: an unquoted verdict is discarded
+    (`snag.judge`), which leaves every mechanical verdict standing and every
+    judged run not-applicable, while still exercising the batching and
+    re-association path. A scripted disagreement here would be the oracle
+    marking its own homework."""
     verdicts = [
         {"ref": ref, "violated": False, "quote": "", "reason": "nothing quotable here"}
-        for ref in _ITEM_REF.findall(payload)
-    ]
-    return _resp(json.dumps({"verdicts": verdicts}))
-
-
-def _review_response(payload: str) -> CompletionResponse:
-    """TIER 2, job 2 — a second opinion on a MECHANICAL break. Every break in
-    this corpus is a planted hole the checker was built to catch, so the
-    scripted judge upholds all of them; a scripted dispute here would be the
-    oracle marking its own homework."""
-    verdicts = [
-        {"ref": ref, "upheld": True, "quote": "", "reason": "the checker read it correctly"}
         for ref in _ITEM_REF.findall(payload)
     ]
     return _resp(json.dumps({"verdicts": verdicts}))
@@ -472,9 +462,6 @@ class ScriptedCompletions:
 
         if request.system == judge_module.JUDGE_SYSTEM:
             return _judge_response(last_content)
-
-        if request.system == judge_module.REVIEW_SYSTEM:
-            return _review_response(last_content)
 
         if request.system == runner_module._TRANSLATE_SETUP_SYSTEM:
             return _resp(_LEAK_MARKER)

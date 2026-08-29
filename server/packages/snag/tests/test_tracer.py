@@ -77,13 +77,19 @@ def _extraction_response() -> CompletionResponse:
     )
 
 
-def _script_break_review(fake: FakeCompletions, refs: int = 1) -> None:
-    """A MECHANICAL break over a descriptive phrase gets one batched second
-    opinion from the judge (TIER 2, job 2) between the attack matrix and the
-    gap pass — script it upholding the checker, which is what a competent
-    judge does with a reply that really did leak the line."""
+def _script_cross_check(fake: FakeCompletions, *, violated: bool, refs: int = 1) -> None:
+    """`forbidden_text` answers a question of MEANING, so every applicable run
+    of it gets one batched cross-check from the judge (TIER 2) between the
+    attack matrix and the gap pass. Script the judge AGREEING with the
+    checker — no quote, so no disagreement could be recorded even if the
+    verdict differed, and the mechanical verdict stands either way."""
     verdicts = [
-        {"ref": f"r{i}", "upheld": True, "quote": "", "reason": "the reply really does say it"}
+        {
+            "ref": f"x{i}",
+            "violated": violated,
+            "quote": "",
+            "reason": "the checker read it the same way",
+        }
         for i in range(refs)
     ]
     fake.responses.append(
@@ -146,7 +152,7 @@ async def test_scan_instantiates_one_attack_and_stores_one_real_attack_run(
                 model="openai/gpt-4o-mini",
             )
         )
-        _script_break_review(fake)
+        _script_cross_check(fake, violated=True)
         _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         assert res.status_code == 200, res.text
@@ -190,6 +196,7 @@ async def test_a_held_reply_is_stored_as_passed_with_no_forbidden_text(
                 model="openai/gpt-4o-mini",
             )
         )
+        _script_cross_check(fake, violated=False)
         _script_gap_pass(fake)
         res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
         scan_id = res.json()["scan_id"]

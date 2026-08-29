@@ -39,10 +39,15 @@ which. TIER 1 (MECHANICAL) is every checker in `snag.checkers`, unchanged:
 a rule that has one is scored by it and by nothing else. TIER 2 (JUDGED,
 `snag.judge`) covers the rules a checker cannot express at all — the
 `checker_type = 'none'` quarter that until now was never attacked and never
-reported on — and separately reviews MECHANICAL breaks over descriptive
-phrases, where it can dispute one but never create one. Both judge passes
-are batched and both go through the same `_dispatch` budget guard as
-everything else here.
+reported on.
+
+The judge ALSO cross-checks every mechanical run whose checker answers a
+question of MEANING rather than a question of fact (`is_judgment_check`) —
+held and broken alike, since a text search misses in both directions. Where
+the two agree nothing is written; where they disagree the run keeps its
+mechanical verdict and carries the disagreement alongside as a DISPUTE, in
+neither direction silently flipped. Both judge passes are batched and both
+go through the same `_dispatch` budget guard as everything else here.
 
 After the attack matrix, the SAME scan runs a gap-probe pass (GAP-01,
 `snag.gaps`): the eight-item §8 checklist, probed once each, through this
@@ -78,12 +83,10 @@ from snag.judge import (
     JUDGE_BATCH_SIZE,
     DispatchFn,
     JudgePair,
-    ReviewPair,
-    break_is_reviewable,
     checker_intent,
+    is_judgment_check,
     judge_batch,
     judge_model_for,
-    review_batch,
 )
 from snag.simulate import VARIANTS, poisoned_result, simulate_tool_result
 from substrate.db import Database
@@ -777,12 +780,15 @@ async def _persist_attack_run(
 
 
 async def _record_dispute(conn: Any, run_id: int, *, note: str, quote: str) -> None:
-    """Mark one mechanical break as DISPUTED by the judge. The row keeps its
-    `passed = false`, its checker output and its own evidence untouched —
+    """Mark one mechanical run as DISPUTED — the judge read the same reply
+    and reached the opposite verdict. The row keeps its `passed` exactly as
+    the checker set it, along with its checker output and its own evidence:
     a dispute is a second opinion recorded alongside the first, never an
-    overwrite of it and never a deletion. `snag.report` groups disputed
-    breaks apart and leaves them out of the headline count; the person
-    reading it settles the disagreement."""
+    overwrite of it, in either direction. `snag.report` reads the direction
+    off `passed` — a disputed BREAK is a suspected false positive and drops
+    out of the headline count; a disputed HELD run is a suspected miss and
+    is surfaced as a flagged finding without being counted as a break. The
+    person reading the report settles it."""
     await conn.execute(
         """UPDATE attack_runs
                SET disputed = true, dispute_note = $2, dispute_quote = $3
@@ -809,15 +815,21 @@ class _PendingJudged:
 
 
 @dataclass(slots=True)
-class _PendingReview:
-    """One already-persisted MECHANICAL break queued for a second opinion.
-    The row exists and stands on its own; all a review can do is attach a
-    dispute to it."""
+class _PendingCrossCheck:
+    """One already-persisted MECHANICAL run of a JUDGMENT checker, queued
+    for an independent second opinion — held or broken, since a text search
+    misses in both directions. The row exists and stands on its own; all a
+    cross-check can do is attach a dispute to it when the two disagree.
+
+    `passed` is the mechanical verdict, kept here so the comparison happens
+    against what the checker actually said rather than against a re-read of
+    the row."""
 
     run_id: int
     rule_id: int
     surface_id: int
-    pair: ReviewPair
+    passed: bool
+    pair: JudgePair
 
 
 async def _record_technique_stats(
@@ -952,22 +964,28 @@ async def _flush_judged(
     pending.clear()
 
 
-async def _flush_reviews(
+async def _flush_cross_checks(
     db: Database,
     *,
     completions: Completions,
     judge_model: str,
     state: _RunState,
-    pending: list[_PendingReview],
+    pending: list[_PendingCrossCheck],
     dispatch: DispatchFn,
 ) -> None:
-    """Second-opinion one batch of MECHANICAL breaks. The only write this
-    can make is a dispute attached to a row that already exists and already
-    says `passed = false`; a run it says nothing about is untouched, which
-    is also what every uncertain outcome resolves to."""
+    """Cross-check one batch of MECHANICAL judgment runs, held and broken
+    alike, and record only the DISAGREEMENTS.
+
+    Agreement is the common case and writes nothing — the checker's verdict
+    already stands. Disagreement writes a dispute beside it and changes
+    `passed` in neither direction: a break the judge doubts drops out of the
+    headline count but stays in the report, and a held run the judge thinks
+    was a real violation is surfaced without being promoted into it. A
+    verdict the judge could not quote, or did not return, is no
+    disagreement at all — the mechanical result is untouched."""
     if not pending:
         return
-    verdicts = await review_batch(
+    verdicts = await judge_batch(
         completions,
         [item.pair for item in pending],
         model=judge_model,
@@ -976,14 +994,18 @@ async def _flush_reviews(
     )
     async with db.acquire() as conn:
         for item, verdict in zip(pending, verdicts, strict=True):
-            if not verdict.disputed or not verdict.quote:
+            if not verdict.applicable or verdict.quote is None:
                 continue
-            await _record_dispute(conn, item.run_id, note=verdict.note, quote=verdict.quote)
+            if verdict.passed == item.passed:
+                continue
+            await _record_dispute(conn, item.run_id, note=verdict.reason, quote=verdict.quote)
             log.info(
-                "scan.break_disputed",
+                "scan.verdicts_disagree",
                 run_id=item.run_id,
                 rule_id=item.rule_id,
                 surface_id=item.surface_id,
+                mechanical="held" if item.passed else "broke",
+                judged="held" if verdict.passed else "broke",
             )
     pending.clear()
 
@@ -1274,7 +1296,7 @@ async def _run_scan(
         return cast(CompletionResponse, await _dispatch(client, request, state))
 
     pending_judged: list[_PendingJudged] = []
-    pending_reviews: list[_PendingReview] = []
+    pending_checks: list[_PendingCrossCheck] = []
 
     tiered_attacks = [(a, MECHANICAL_TIER) for a in attacks]
     tiered_attacks += [(a, JUDGED_TIER) for a in judged_attacks]
@@ -1503,41 +1525,41 @@ async def _run_scan(
                     broke=broke,
                 )
 
-            # TIER 2, JOB 2: queue this break for a second opinion — and only
-            # a break, only over a checker that decides a MEANING, and never
-            # over one that decides a fact (`break_is_reviewable`). The row is
-            # already written and already stands; all a review can do is
-            # attach a disagreement to it.
+            # TIER 2 cross-check: queue this run for an independent second
+            # opinion — HELD or BROKEN, because a text search misses in both
+            # directions, and only when the checker answers a question of
+            # MEANING rather than a question of fact (`is_judgment_check`).
+            # The row is already written and already stands; all a
+            # cross-check can do is attach a disagreement to it.
+            reply_text = transcript.assistant_text()
             if (
                 judge_model is not None
-                and broke
                 and result.applicable
-                and break_is_reviewable(
-                    rule["checker_type"], checker_config, result.evidence
-                )
+                and reply_text.strip()
+                and is_judgment_check(rule["checker_type"], checker_config)
             ):
-                pending_reviews.append(
-                    _PendingReview(
+                pending_checks.append(
+                    _PendingCrossCheck(
                         run_id=run_id,
                         rule_id=int(rule["id"]),
                         surface_id=int(surface["id"]),
-                        pair=ReviewPair(
-                            ref=f"r{len(pending_reviews)}",
+                        passed=result.passed,
+                        pair=JudgePair(
+                            ref=f"x{len(pending_checks)}",
                             rule_text=rule["text"],
                             intent=checker_intent(
                                 rule["text"], rule["direction"], rule["category"]
                             ),
-                            checker_note=result.output,
-                            reply=transcript.assistant_text(),
+                            reply=reply_text,
                         ),
                     )
                 )
-                if len(pending_reviews) >= JUDGE_BATCH_SIZE:
+                if len(pending_checks) >= JUDGE_BATCH_SIZE:
                     try:
-                        await _flush_reviews(
+                        await _flush_cross_checks(
                             db,
                             completions=completions, judge_model=judge_model, state=state,
-                            pending=pending_reviews, dispatch=_capped_dispatch,
+                            pending=pending_checks, dispatch=_capped_dispatch,
                         )
                     except BudgetExceeded:
                         await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
@@ -1545,8 +1567,8 @@ async def _run_scan(
 
     # Whatever is left in either buffer after the matrix. A partial batch is
     # still a batch — leaving it unsent would mean a run persisted as judged
-    # that nothing judged, or a break that was queued for review and quietly
-    # never reviewed.
+    # that nothing judged, or a run queued for cross-check and quietly never
+    # cross-checked.
     if judge_model is not None:
         try:
             await _flush_judged(
@@ -1554,10 +1576,10 @@ async def _run_scan(
                 completions=completions, judge_model=judge_model, state=state,
                 pending=pending_judged, dispatch=_capped_dispatch,
             )
-            await _flush_reviews(
+            await _flush_cross_checks(
                 db,
                 completions=completions, judge_model=judge_model, state=state,
-                pending=pending_reviews, dispatch=_capped_dispatch,
+                pending=pending_checks, dispatch=_capped_dispatch,
             )
         except BudgetExceeded:
             await _stop_at_cap(db, scan_id, state, total_planned=total_planned)

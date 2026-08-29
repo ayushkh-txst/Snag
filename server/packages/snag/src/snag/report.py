@@ -34,13 +34,23 @@ the span of the reply the verdict rests on, checked character for character
 before it was stored. `byTier` counts the two apart so a headline never
 flattens a model's opinion into a checker's result.
 
-A DISPUTED break is a mechanical break the judge, on review, believes the
-checker misread — a denial or a hypothetical a text search counted as an
-assertion. It stays in `breaks[]`, keeps its transcript and its checker
-output, and carries `disputeNote`/`disputeQuote`; it is only kept out of
-`rule.breaks`, `bySurface` and the headline count. Deleting a real break to
-make a report look clean would be the same dishonesty as reporting a fake
-one.
+The judge also cross-checks every mechanical run whose checker answers a
+question of MEANING, held and broken alike, and DISAGREEMENTS are recorded
+without resolving them. They surface two ways, and neither changes what the
+checker said:
+
+* A disputed BREAK — a suspected false positive, a denial or a hypothetical
+  a text search counted as an assertion. It stays in `breaks[]` with its
+  transcript, its checker output and `disputeNote`/`disputeQuote`, and is
+  kept out of `rule.breaks`, `bySurface` and the headline count.
+* A flagged HOLD — a suspected MISS, the direction a break-only pass cannot
+  see: forbidden advice nobody configured a keyword for, a paraphrased
+  leak. Those groups appear in `flagged[]`, never in `breaks[]` and never in
+  any count, because a model's opinion is enough to be worth a look and not
+  enough to make a break.
+
+Deleting a real break to make a report look clean, and inventing one on a
+model's say-so, are the same dishonesty pointed in opposite directions.
 
 Honest coverage (01-18): a stored run with `applicable = false` tested
 nothing — a canary checker handed an attack that planted no canary, or a
@@ -195,8 +205,12 @@ def _build_break_entry(
     # is a second opinion recorded next to the checker's, not a deletion. It
     # is only kept out of the counts the headline is built from.
     disputed_hits = sum(1 for r in broken_runs if r["disputed"])
+    # The other direction: a run the checker HELD and the judge reads as a
+    # real violation. Never promoted into `hits` — a model's say-so does not
+    # make a break — but surfaced so the miss is visible rather than silent.
+    flagged_runs = [r for r in runs_sorted if r["passed"] and r["disputed"]]
     undisputed = [r for r in broken_runs if not r["disputed"]]
-    representative = (undisputed or broken_runs or runs_sorted)[0]
+    representative = (undisputed or broken_runs or flagged_runs or runs_sorted)[0]
     rule_id, surface_id, technique_id = key
     entry: dict[str, Any] = {
         "id": _break_id([r["id"] for r in runs_sorted]),
@@ -211,6 +225,7 @@ def _build_break_entry(
         "falsePositive": excluded,
         "verdictTier": _tier(representative),
         "disputedHits": disputed_hits,
+        "flaggedHits": len(flagged_runs),
         # The whole group is disputed only when EVERY break in it is. One
         # undisputed repeat is enough for the finding to stand.
         "disputed": hits > 0 and disputed_hits == hits,
@@ -221,28 +236,45 @@ def _build_break_entry(
     if entry["disputed"]:
         entry["disputeNote"] = representative["dispute_note"] or ""
         entry["disputeQuote"] = representative["dispute_quote"] or ""
+    elif hits == 0 and flagged_runs:
+        # A `flagged[]` entry: nothing broke mechanically, so the reason to
+        # look at it is the judge's own, and it is the judge's words that
+        # have to be shown.
+        entry["disputeNote"] = flagged_runs[0]["dispute_note"] or ""
+        entry["disputeQuote"] = flagged_runs[0]["dispute_quote"] or ""
     return entry
 
 
 def _build_breaks(
     run_rows: list[asyncpg.Record], excluded_keys: set[BreakKey]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Collapse one scan's `attack_runs` rows into `Break` entries — one per
     (rule, surface, technique) group that has at least one failing repeat.
     A group with zero failures never broke anything and is not a `Break`
     (README: "every rule with breaks > 0 has at least one stored attack
-    run" — the converse also holds: no failing run, no `Break` entry)."""
+    run" — the converse also holds: no failing run, no `Break` entry).
+
+    Returns `(breaks, flagged)`. FLAGGED is the second list and is not a
+    break: a group nothing broke mechanically, where the judge read a reply
+    the checker held and called it a violation. It is a suspected MISS —
+    the direction a break-only pass cannot see — and it is reported
+    separately precisely because a model's opinion is not enough to make a
+    break, only enough to be worth a look."""
     groups: dict[BreakKey, list[asyncpg.Record]] = defaultdict(list)
     for run in run_rows:
         groups[_break_key(run)].append(run)
 
-    breaks = [
-        _build_break_entry(key, runs, excluded=key in excluded_keys)
-        for key, runs in groups.items()
-        if any(not r["passed"] for r in runs)
-    ]
+    breaks = []
+    flagged = []
+    for key, runs in groups.items():
+        broke = any(not r["passed"] for r in runs)
+        if broke:
+            breaks.append(_build_break_entry(key, runs, excluded=key in excluded_keys))
+        elif any(r["passed"] and r["disputed"] for r in runs):
+            flagged.append(_build_break_entry(key, runs, excluded=key in excluded_keys))
     breaks.sort(key=lambda b: (-b["hits"], b["id"]))
-    return breaks
+    flagged.sort(key=lambda b: (-b["flaggedHits"], b["id"]))
+    return breaks, flagged
 
 
 async def _fetch_all_runs(conn: Any, slug: str) -> list[asyncpg.Record]:
@@ -291,7 +323,7 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         else []
     )
 
-    breaks = _build_breaks(run_rows, excluded_keys)
+    breaks, flagged = _build_breaks(run_rows, excluded_keys)
 
     attacks_by_rule: dict[int, int] = defaultdict(int)
     attacks_by_surface: dict[int, int] = defaultdict(int)
@@ -409,6 +441,7 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         MECHANICAL_TIER: {"attacks": 0, "breaks": 0},
         JUDGED_TIER: {"attacks": 0, "breaks": 0},
         "disputed": 0,
+        "flagged": 0,
     }
     for run in run_rows:
         bucket = by_tier[_tier(run)]
@@ -418,6 +451,8 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
                 by_tier["disputed"] += 1
             else:
                 bucket["breaks"] += 1
+        elif run["disputed"]:
+            by_tier["flagged"] += 1
 
     # Report.tsx unconditionally reads history[0] — always give it one row,
     # even before any scan has run, so the existing JSX never crashes on
@@ -508,6 +543,7 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         "coverage": coverage,
         "bySurface": by_surface,
         "byTier": by_tier,
+        "flagged": flagged,
     }
 
 

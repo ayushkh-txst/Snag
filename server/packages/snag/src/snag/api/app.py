@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
@@ -16,7 +16,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
-from starlette.responses import Response
+from starlette.responses import PlainTextResponse, Response
 from starlette.types import Scope
 
 from snag.api import routers as routers_pkg
@@ -91,6 +91,27 @@ def _dist_dir() -> Path:
 def create_app() -> FastAPI:
     app = FastAPI(title="Snag", lifespan=lifespan)
     _include_routers(app)
+
+    @app.middleware("http")
+    async def add_robots_header(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        # On every response, not just the HTML document: a report link shared
+        # into a crawlable place shouldn't be indexable through its API URL
+        # either. See the robots.txt handler for why both layers exist.
+        response = await call_next(request)
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        return response
+
+    @app.get("/robots.txt", response_class=PlainTextResponse)
+    async def robots() -> str:
+        """Snag is link-only — a scan report is the user's own prompt and its
+        breaks, which has no business in a search index. robots.txt keeps a
+        compliant crawler from fetching at all; the `X-Robots-Tag` above keeps
+        a page out of an index even if something links to it and the crawler
+        ignores this file. Registered before the SPA mount below, which would
+        otherwise answer for it."""
+        return "User-agent: *\nDisallow: /\n"
 
     @app.exception_handler(CompletionError)
     async def completion_error_handler(request: Request, exc: CompletionError) -> Response:

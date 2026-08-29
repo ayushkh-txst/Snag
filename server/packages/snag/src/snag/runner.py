@@ -42,8 +42,10 @@ a rule that has one is scored by it and by nothing else. TIER 2 (JUDGED,
 reported on.
 
 The judge ALSO cross-checks every mechanical run whose checker answers a
-question of MEANING rather than a question of fact (`is_judgment_check`) —
-held and broken alike, since a text search misses in both directions. Where
+question of MEANING rather than a question of fact — held and broken alike,
+since a text search misses in both directions — and every HELD run of a leak
+checker, whose "no verbatim run matched" was never evidence that nothing was
+revealed (`may_cross_check` for both). Where
 the two agree nothing is written; where they disagree the run keeps its
 mechanical verdict and carries the disagreement alongside as a DISPUTE, in
 neither direction silently flipped. Both judge passes are batched and both
@@ -88,9 +90,9 @@ from snag.judge import (
     DispatchFn,
     JudgePair,
     checker_intent,
-    is_judgment_check,
     judge_batch,
     judge_model_for,
+    may_cross_check,
 )
 from snag.simulate import VARIANTS, poisoned_result, simulate_tool_result
 from substrate.db import Database
@@ -1509,17 +1511,18 @@ async def _process_unit(
             broke=broke,
         )
 
-    # TIER 2 cross-check: queue this run for an independent second opinion —
-    # HELD or BROKEN, because a text search misses in both directions, and only
-    # when the checker answers a question of MEANING rather than a question of
-    # fact (`is_judgment_check`). The row is already written and already stands;
-    # all a cross-check can do is attach a disagreement to it.
+    # TIER 2 cross-check: queue this run for an independent second opinion.
+    # A question of MEANING goes either way it landed, because a text search
+    # misses in both directions. A leak fact goes only when it HELD, because
+    # "no verbatim run matched" is not "nothing was revealed" (`may_cross_check`).
+    # The row is already written and already stands; all a cross-check can do is
+    # attach a disagreement to it.
     reply_text = transcript.assistant_text()
     if (
         judge_model is not None
         and result.applicable
         and reply_text.strip()
-        and is_judgment_check(rule["checker_type"], checker_config)
+        and may_cross_check(rule["checker_type"], checker_config, passed=result.passed)
     ):
         pending_checks.append(
             _PendingCrossCheck(

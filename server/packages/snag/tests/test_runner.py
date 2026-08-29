@@ -672,7 +672,15 @@ async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
         [_attack_surface(chat_id, kind="chat", path="user message")],
         _TECHNIQUES,
     )
-    assert {a.technique_id for a in expected} == {"roleplay.02", "auth_confusion.01"}
+    # `direct_request.*` is the control condition and targets `identity` too;
+    # it plants no canary either, so it joins `auth_confusion.01` on the
+    # not-applicable side of what this test is asserting.
+    assert {a.technique_id for a in expected} == {
+        "roleplay.02",
+        "auth_confusion.01",
+        "direct_request.01",
+        "direct_request.02",
+    }
     fake.responses.extend(
         _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
     )
@@ -690,9 +698,15 @@ async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
         }
     # Both runs are still STORED — the dispatch really happened and its
     # transcript is worth keeping — but only one of them tested anything.
-    assert set(runs) == {"roleplay.02", "auth_confusion.01"}
-    assert runs["auth_confusion.01"]["applicable"] is False
-    assert runs["auth_confusion.01"]["passed"] is True  # never counted as a break either
+    assert set(runs) == {
+        "roleplay.02",
+        "auth_confusion.01",
+        "direct_request.01",
+        "direct_request.02",
+    }
+    for no_canary in ("auth_confusion.01", "direct_request.01", "direct_request.02"):
+        assert runs[no_canary]["applicable"] is False
+        assert runs[no_canary]["passed"] is True  # never counted as a break either
     assert runs["roleplay.02"]["applicable"] is True
 
     # ...and the report counts one attack for this rule, not two.

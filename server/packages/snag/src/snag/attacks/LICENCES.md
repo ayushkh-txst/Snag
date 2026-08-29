@@ -24,6 +24,7 @@ commercial-use verdict per source, checked before any of it reached
 | [EPFL llm-past-tense](https://github.com/tml-epfl/llm-past-tense) | MIT | Yes | `past_tense` |
 | [GenAI-Red-Team-Lab](https://github.com/GenAI-Security-Project/GenAI-Red-Team-Lab) | Apache-2.0 | Yes | `context_padding` (long benign-context / NINJA) |
 | hand-written (app-specific) | N/A — original work, no external source | Yes | `business_logic_bypass`, `tool_arg_injection`, `auth_confusion`, `refusal_bypass` |
+| hand-written (control condition) | N/A — original work, no external source | Yes | `direct_request` — plainly ask for what the rule forbids, with no manipulation. The baseline every other family is measured against, and the only one that can see a prompt contradicting itself. |
 
 Note on the PyRIT URL: the canonical repository is `microsoft/PyRIT`.
 `Azure/PyRIT` (which an earlier revision of this file linked) is an archived

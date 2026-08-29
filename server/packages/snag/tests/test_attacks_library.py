@@ -49,6 +49,8 @@ EXPECTED_FAMILIES = {
     # phase 2 of the same pass: the families that needed runner support.
     "prefill",
     "escalation_ladder",
+    # The control condition: ask plainly, with no manipulation at all.
+    "direct_request",
 }
 
 

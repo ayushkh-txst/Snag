@@ -76,6 +76,14 @@ export interface Turn {
   planted?: string;
   /** Substring to mark as the checker's evidence of a break. */
   evidence?: string;
+  /**
+   * True for an `assistant` turn the ATTACK wrote rather than the model —
+   * the prefill technique family seeds a fabricated "I've already started
+   * complying" opener into the request so the model continues from it. It
+   * is kept in the transcript because the report must show what was
+   * actually sent, and it must never be rendered as the model's own words.
+   */
+  forged?: boolean;
 }
 
 export interface BreakVariant {

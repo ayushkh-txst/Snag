@@ -446,6 +446,12 @@ def _turn_to_json(turn: Turn) -> dict[str, Any]:
         data["planted"] = turn.planted
     if turn.evidence is not None:
         data["evidence"] = turn.evidence
+    if turn.forged:
+        # BREAK-01 honesty: the stored transcript must not let a fabricated
+        # assistant turn read as something the model actually said. The flag
+        # is what `src/data/types.ts`'s `Turn.forged` and `BreakDetail` use
+        # to label it "forged by the attack" instead of "model".
+        data["forged"] = True
     return data
 
 
@@ -464,14 +470,26 @@ async def _execute_attack(
     state: _RunState,
     turns_override: tuple[str, ...] | None = None,
     tool_schemas: dict[str, dict[str, Any]] | None = None,
+    prefill: str | None = None,
 ) -> tuple[Transcript, Any]:
     """Dispatch one (attack, repeat) pair — possibly multiple scripted
     turns, each a full `complete()` round trip with the growing message
     history (this port is stateless; there is no server-side conversation).
     `turns_override` replaces `attack.prompt_or_turns` when given — the
     MULTI-TURN engine's padded sequence (`_pad_to_multiturn_depth`) rather
-    than the technique's own raw turns. Raises
-    `BudgetExceeded`/`ToolsNotSupportedError`/`CompletionError` if a
+    than the technique's own raw turns.
+
+    `prefill` (report §S1, `Technique.prefill`) is a FORGED assistant turn
+    inserted immediately before the FINAL user turn, so the model continues
+    from a state in which it has already begun complying. It costs no
+    dispatch of its own — it is a message in the request, not a round trip —
+    so a prefill technique's call count is exactly its turn count, and the
+    budget guard's arithmetic is unchanged. It is recorded as
+    `Turn(forged=True)`: kept in the transcript so the Break detail screen
+    shows honestly what was sent, excluded from `Transcript.assistant_text()`
+    so no checker can mistake attacker text for the model's own words.
+
+    Raises `BudgetExceeded`/`ToolsNotSupportedError`/`CompletionError` if a
     dispatch fails partway through — the caller does not persist a partial
     attack_run in that case."""
     turns_text = turns_override if turns_override is not None else (
@@ -482,8 +500,14 @@ async def _execute_attack(
     messages: list[Message] = []
     transcript_turns: list[Turn] = []
     final_response: Any = None
+    last_index = len(turns_text) - 1
 
-    for turn_text in turns_text:
+    for index, turn_text in enumerate(turns_text):
+        if prefill and index == last_index:
+            messages.append(Message(Role.ASSISTANT, prefill))
+            transcript_turns.append(
+                Turn(role="assistant", content=prefill, planted=prefill, forged=True)
+            )
         messages.append(Message(Role.USER, turn_text))
         transcript_turns.append(Turn(role="user", content=turn_text, planted=turn_text))
 
@@ -941,9 +965,13 @@ async def _run_scan(
             )
             turns_override = _pad_to_multiturn_depth(base_turns)
 
-        indirect_technique = (
-            TECHNIQUE_BY_ID[attack.technique_id] if attack.surface_kind == INDIRECT_KIND else None
-        )
+        technique = TECHNIQUE_BY_ID[attack.technique_id]
+        indirect_technique = technique if attack.surface_kind == INDIRECT_KIND else None
+        # §S1: only the direct/tool paths can forge a turn. The INDIRECT path
+        # builds its own fixed exchange (`_execute_indirect_attack`) and no
+        # technique in the `prefill` family reaches `tool_return`, so there is
+        # nothing to thread through there.
+        prefill = technique.prefill
         indirect_tool_name = (
             _tool_name_from_surface_path(surface["path"])
             if attack.surface_kind == INDIRECT_KIND
@@ -972,6 +1000,7 @@ async def _run_scan(
                         state=state,
                         turns_override=turns_override,
                         tool_schemas=tool_schemas,
+                        prefill=prefill,
                     )
             except BudgetExceeded:
                 await _stop_at_cap(db, scan_id, state, total_planned=total_planned)

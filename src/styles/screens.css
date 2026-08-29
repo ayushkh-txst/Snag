@@ -646,6 +646,11 @@
 .turn[data-role="tool_result"] { background: var(--paper-2); margin: 0 calc(var(--s4) * -1); padding-left: var(--s4); padding-right: var(--s4); }
 .turn[data-role="tool_call"] .turn__role .mono:first-child,
 .turn[data-role="tool_result"] .turn__role .mono:first-child { color: var(--eyes); }
+/* A forged assistant turn is text the attack put in the model's mouth (the
+   prefill family) — it must never read as a reply the model gave. */
+.turn[data-forged] { border-left: 2px solid var(--eyes); padding-left: var(--s3); margin-left: calc(var(--s3) * -1); }
+.turn[data-forged] .turn__role .mono:first-child { color: var(--eyes); }
+.turn[data-forged] .turn__body { font-style: italic; }
 .turn__body { font-size: var(--t-sm); }
 @media (max-width: 620px) { .turn { grid-template-columns: 1fr; gap: var(--s2); } }
 

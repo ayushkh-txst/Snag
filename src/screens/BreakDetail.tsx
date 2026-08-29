@@ -142,9 +142,11 @@ export function BreakDetail() {
             </div>
           </header>
           {turns.map((t, i) => (
-            <article className="turn" key={i} data-role={t.role}>
+            <article className="turn" key={i} data-role={t.role} data-forged={t.forged || undefined}>
               <div className="turn__role">
-                <span className="mono">{ROLE_WORD[t.role]}</span>
+                {/* A forged turn is text the ATTACK put in the model's mouth
+                    (the prefill family) — never label it "model". */}
+                <span className="mono">{t.forged ? "forged — not the model" : ROLE_WORD[t.role]}</span>
                 {t.name && <span className="mono turn__name">{t.name}</span>}
               </div>
               <div className="turn__body source">

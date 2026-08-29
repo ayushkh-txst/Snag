@@ -97,8 +97,11 @@ def _tools_text(prompt_version: asyncpg.Record | None) -> str:
 
 
 def _last_assistant_text(conversation: list[dict[str, Any]] | None) -> str:
+    """The model's own last reply. A `forged` turn is the prefill attack's
+    fabricated assistant opener (`runner._execute_attack`) — attacker text,
+    never a reply, so it can never be surfaced as one."""
     for turn in reversed(conversation or []):
-        if turn.get("role") == "assistant":
+        if turn.get("role") == "assistant" and not turn.get("forged"):
             return str(turn.get("content", ""))
     return ""
 

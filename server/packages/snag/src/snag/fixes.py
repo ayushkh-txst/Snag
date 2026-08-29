@@ -47,8 +47,12 @@ def _attack_key(row: Any) -> str:
 
 
 def _last_assistant_text(conversation: list[dict[str, Any]] | None) -> str:
+    """The model's own last reply — a `forged` turn is the prefill attack's
+    fabricated assistant opener, attacker text rather than a reply, and must
+    never be fed to the fix-proposal prompt as evidence of what the model
+    said."""
     for turn in reversed(conversation or []):
-        if turn.get("role") == "assistant":
+        if turn.get("role") == "assistant" and not turn.get("forged"):
             return str(turn.get("content", ""))
     return ""
 

@@ -39,11 +39,23 @@ def work(
 
 
 @app.command("seed")
-def seed() -> None:
+def seed(
+    force: bool = typer.Option(
+        False, "--force", help="Re-seed slugs that already exist, replacing them. Costs real spend."
+    ),
+    only: str = typer.Option(
+        "", "--only", help="Restrict to a comma-separated list of slugs. Default: all six."
+    ),
+) -> None:
     """Idempotently seed the six example projects (01-15) at their fixed
     slugs, running each through the real pipeline with the owner's
     OpenRouter key. Safe to run on every deploy: a slug that's already
-    seeded is skipped, at zero additional spend (T-15-02)."""
+    seeded is skipped, at zero additional spend (T-15-02).
+
+    `--force` replaces an existing example instead of skipping it, and
+    `--only` narrows the run to named slugs — authoring these prompts is
+    iterative, and re-running one example shouldn't rescan the other five.
+    """
     from snag.seed import seed_examples
     from substrate.db import Database
     from substrate.llm.factory import build_completions
@@ -54,7 +66,8 @@ def seed() -> None:
             completions = build_completions(
                 provider=settings.llm_provider, api_key=settings.openrouter_api_key
             )
-            return await seed_examples(db, completions)
+            slugs = [s.strip() for s in only.split(",") if s.strip()]
+            return await seed_examples(db, completions, force=force, only=slugs or None)
 
     settings = get_settings()
     configure_logging(settings.log_level)

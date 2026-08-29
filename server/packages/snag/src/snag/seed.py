@@ -232,12 +232,32 @@ async def _project_exists(db: Database, slug: str) -> bool:
         return bool(await conn.fetchval("SELECT 1 FROM projects WHERE id = $1", slug))
 
 
-async def _seed_one(db: Database, completions: Completions, spec: SeedPromptSpec) -> bool:
+async def _delete_project(db: Database, slug: str) -> None:
+    """Drop a seeded example and everything hanging off it, relying on the
+    schema's own ON DELETE CASCADE (the same single-statement delete
+    PRIV-01 uses). Only ever called for a `SEED_PROMPTS` slug under
+    `--force`."""
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM projects WHERE id = $1", slug)
+
+
+async def _seed_one(
+    db: Database, completions: Completions, spec: SeedPromptSpec, *, force: bool = False
+) -> bool:
     """Run the full pipeline for one authored prompt. Returns `False`
-    (no-op) when `spec.slug` already exists — idempotency (T-15-02)."""
+    (no-op) when `spec.slug` already exists — idempotency (T-15-02).
+
+    `force` re-seeds instead of skipping: the existing project is deleted
+    and the pipeline runs again from scratch. Authoring these prompts is
+    iterative — you weaken a rule, re-run, and see whether it actually
+    breaks — and without this the only way to try a revision was a
+    hand-written DELETE against the database."""
     if await _project_exists(db, spec.slug):
-        log.info("seed.already_seeded", slug=spec.slug)
-        return False
+        if not force:
+            log.info("seed.already_seeded", slug=spec.slug)
+            return False
+        log.info("seed.reseeding", slug=spec.slug)
+        await _delete_project(db, spec.slug)
 
     validate_model(spec.model)
 
@@ -284,11 +304,19 @@ async def _seed_one(db: Database, completions: Completions, spec: SeedPromptSpec
     return True
 
 
-async def seed_examples(db: Database, completions: Completions) -> list[str]:
+async def seed_examples(
+    db: Database, completions: Completions, *, force: bool = False, only: list[str] | None = None
+) -> list[str]:
     """Seed every example in `SEED_PROMPTS`. Returns the slugs actually
-    seeded this call (already-seeded slugs are skipped and excluded)."""
+    seeded this call (already-seeded slugs are skipped and excluded).
+
+    `force` re-runs the pipeline for a slug that already exists, replacing
+    it. `only` restricts the run to the named slugs — re-authoring one
+    example shouldn't cost a re-scan of the other five."""
     seeded: list[str] = []
     for spec in SEED_PROMPTS:
-        if await _seed_one(db, completions, spec):
+        if only is not None and spec.slug not in only:
+            continue
+        if await _seed_one(db, completions, spec, force=force):
             seeded.append(spec.slug)
     return seeded

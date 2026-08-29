@@ -312,11 +312,25 @@ async def seed_examples(
 
     `force` re-runs the pipeline for a slug that already exists, replacing
     it. `only` restricts the run to the named slugs — re-authoring one
-    example shouldn't cost a re-scan of the other five."""
+    example shouldn't cost a re-scan of the other five.
+
+    A single example failing — most likely a run of provider 429s outlasting
+    the adapter's retries — is logged and skipped, not allowed to abort the
+    whole batch. Found the hard way: a rate-limit burst on the sixth example
+    threw away a completed scan of the other five. The failures are returned
+    to the caller (and surfaced by the CLI) so a partial seed is never
+    mistaken for a clean one."""
     seeded: list[str] = []
+    failed: list[str] = []
     for spec in SEED_PROMPTS:
         if only is not None and spec.slug not in only:
             continue
-        if await _seed_one(db, completions, spec, force=force):
-            seeded.append(spec.slug)
+        try:
+            if await _seed_one(db, completions, spec, force=force):
+                seeded.append(spec.slug)
+        except Exception as exc:  # one example must not sink the batch
+            failed.append(spec.slug)
+            log.error("seed.failed", slug=spec.slug, error=repr(exc))
+    if failed:
+        log.warning("seed.partial", seeded=seeded, failed=failed)
     return seeded

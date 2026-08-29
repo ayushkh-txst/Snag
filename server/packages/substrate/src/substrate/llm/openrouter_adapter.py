@@ -73,7 +73,7 @@ class OpenRouterCompletions:
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
         ledger: CostLedger | None = None,
-        max_attempts: int = 3,
+        max_attempts: int = 5,
         clock: Any = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:

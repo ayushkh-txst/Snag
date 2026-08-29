@@ -77,7 +77,7 @@ PROMPT = SeedPromptSpec(
         "Command-safety rule talked past · claimable maintainer exception · "
         "hardcoded-secret rule holds"
     ),
-    model="qwen/qwen3.8-flash",
+    model="deepseek/deepseek-v4-flash-0731",
     system_prompt=SYSTEM_PROMPT,
     tools_json=TOOLS_JSON,
     surfaces=("direct", "tool"),

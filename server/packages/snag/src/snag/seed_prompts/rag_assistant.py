@@ -60,7 +60,7 @@ PROMPT = SeedPromptSpec(
         "Retrieved pages treated as authoritative · poisoned context "
         "becomes an instruction · bypass token read aloud"
     ),
-    model="qwen/qwen3.8-flash",
+    model="deepseek/deepseek-v4-flash-0731",
     system_prompt=SYSTEM_PROMPT,
     tools_json=TOOLS_JSON,
     surfaces=("direct", "indirect"),

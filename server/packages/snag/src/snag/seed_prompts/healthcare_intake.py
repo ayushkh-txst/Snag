@@ -59,7 +59,7 @@ PROMPT = SeedPromptSpec(
         "Refusal rule contradicted two lines later · scope boundary needs your "
         "eyes · identity rule holds"
     ),
-    model="qwen/qwen3.8-flash",
+    model="deepseek/deepseek-v4-flash-0731",
     system_prompt=SYSTEM_PROMPT,
     tools_json=None,
     surfaces=("direct",),

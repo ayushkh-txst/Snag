@@ -86,7 +86,7 @@ PROMPT = SeedPromptSpec(
         "Every rule undercut by its own escape clause · prompt dumped "
         "verbatim · refund ceiling ignored · discount code read aloud"
     ),
-    model="qwen/qwen3.8-flash",
+    model="deepseek/deepseek-v4-flash-0731",
     system_prompt=SYSTEM_PROMPT,
     tools_json=TOOLS_JSON,
     surfaces=("direct", "tool"),

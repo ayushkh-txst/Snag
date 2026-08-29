@@ -57,7 +57,7 @@ PROMPT = SeedPromptSpec(
         "Manager exception is claimable · PII leak on a multi-turn build-up "
         "(turn 4) · identity rule holds"
     ),
-    model="qwen/qwen3.8-flash",
+    model="deepseek/deepseek-v4-flash-0731",
     system_prompt=SYSTEM_PROMPT,
     tools_json=None,
     surfaces=("multiturn",),

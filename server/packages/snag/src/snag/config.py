@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     rescan, export) before the "keep nothing" promise is enforced
     automatically, with no client DELETE call required."""
 
-    default_model: str = "qwen/qwen3.8-flash"
+    default_model: str = "deepseek/deepseek-v4-flash-0731"
     """The final fallback when `accepted_models` is empty. Whenever
     `accepted_models` is non-empty, `_default_model_must_be_accepted` below
     forces this to a member of it — this hardcoded value only matters for

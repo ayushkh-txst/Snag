@@ -227,8 +227,7 @@ async def test_unknown_model_gets_a_conservative_estimate_not_a_lost_response() 
 async def test_structured_output_disables_reasoning_by_default() -> None:
     """A reasoning model asked for JSON spends its whole budget thinking and
     returns nothing — measured on qwen/qwen3.8-flash at 2048/4096/8192, where
-    reasoning_tokens == max_tokens and content was empty every time. An unset
-    `reasoning` therefore means "off when a schema is set"."""
+    reasoning_tokens == max_tokens and content was empty every time."""
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -239,9 +238,18 @@ async def test_structured_output_disables_reasoning_by_default() -> None:
     assert captured["reasoning"] == {"enabled": False}
 
 
-async def test_free_form_call_leaves_reasoning_alone() -> None:
-    """An attack dispatch must keep thinking normally — the model's own
-    unprompted behaviour is exactly what is under test."""
+async def test_a_free_form_call_disables_reasoning_too() -> None:
+    """Thinking is off by default for EVERY call, not just the structured
+    ones. Measured against deepseek/deepseek-v4-flash-0731 with the body a
+    Snag attack dispatch actually sends: 320 completion tokens, 307 of them
+    reasoning, leaving thirteen for the reply — which is why replies were
+    coming back truncated and unscorable.
+
+    The deeper reason is that the assistants these attacks simulate do not
+    ship with thinking on; it is slow and expensive per turn. Testing with it
+    on measures a configuration nobody deploys, and biases the result toward
+    finding FEWER breaks, because a model reasoning its way through "this
+    looks like an injection" resists better than the deployed one."""
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -249,6 +257,19 @@ async def test_free_form_call_leaves_reasoning_alone() -> None:
         return httpx.Response(200, json=_chat_completion())
 
     await _adapter(handler).complete(_request())
+    assert captured["reasoning"] == {"enabled": False}
+
+
+async def test_reasoning_can_still_be_asked_for_explicitly() -> None:
+    """The off-by-default is a default, not a ban: a caller testing a
+    deployment that really does run with thinking on says so per request."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion())
+
+    await _adapter(handler).complete(_request(reasoning=True))
     assert "reasoning" not in captured
 
 

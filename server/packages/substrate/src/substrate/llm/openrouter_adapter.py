@@ -208,20 +208,29 @@ class OpenRouterCompletions:
         if request.tools:
             body["tools"] = list(request.tools)
 
-        # A reasoning model asked for structured output will happily spend
-        # the whole completion budget thinking and return an empty string.
-        # Measured against qwen/qwen3.8-flash on Snag's rule extraction:
-        # reasoning_tokens == max_tokens and content == "" at 2048, 4096 AND
-        # 8192 — more budget just buys more thinking. With reasoning off it
-        # answered inside 2048. So an unset `reasoning` means "off when a
-        # schema is set": the tokens belong to the answer, not a preamble
-        # that gets discarded. An explicit True/False always wins, which is
-        # what keeps a free-form attack dispatch thinking normally — there
-        # the model's own unprompted behaviour is the thing under test.
-        reasoning = request.reasoning
-        if reasoning is None:
-            reasoning = request.json_schema is None
-        if not reasoning:
+        # Thinking is OFF unless a caller asks for it, on every call.
+        #
+        # It began as a structured-output fix: a reasoning model asked for
+        # JSON spends the whole budget thinking and returns an empty string
+        # (qwen/qwen3.8-flash, reasoning_tokens == max_tokens and no content
+        # at 2048, 4096 AND 8192 — more budget only buys more thinking).
+        # Free-form calls were left at the provider default on the theory
+        # that a target model's unprompted behaviour is the thing under test.
+        #
+        # That confused UNPERTURBED with REPRESENTATIVE. The assistants these
+        # calls simulate do not ship with thinking on — it is slow and
+        # expensive per turn — so leaving it on measured a configuration
+        # nobody deploys, and measured it in the least useful direction: a
+        # model reasoning its way through "this looks like an injection"
+        # resists better than the deployed one, so breaks were being
+        # UNDER-reported. Measured on deepseek/deepseek-v4-flash-0731 with
+        # the exact body an attack dispatch sends: 320 completion tokens, 307
+        # of them reasoning, thirteen left for the reply — which is also why
+        # replies were arriving truncated and unscorable.
+        #
+        # `reasoning=True` still turns it on for a caller testing a
+        # deployment that genuinely runs that way.
+        if not request.reasoning:
             body["reasoning"] = {"enabled": False}
         return body
 

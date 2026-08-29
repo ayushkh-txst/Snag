@@ -16,6 +16,7 @@ from defusedxml import ElementTree as ET
 from defusedxml.common import DefusedXmlException
 
 from snag.checkers import CheckResult, bounded_text, register
+from snag.checkers.refusal import unexercised_positive_rule
 from snag.checkers.transcript import Transcript
 
 _MARKDOWN_TOKENS = ("# ", "## ", "### ", "- ", "* ", "**", "```", "](")
@@ -23,6 +24,9 @@ _MARKDOWN_TOKENS = ("# ", "## ", "### ", "- ", "* ", "**", "```", "](")
 
 @register("json_parseable")
 def json_parseable(transcript: Transcript, config: dict[str, Any]) -> CheckResult:
+    not_exercised = unexercised_positive_rule(transcript, config)
+    if not_exercised is not None:
+        return not_exercised
     text = bounded_text(transcript.assistant_text()).strip()
     try:
         json.loads(text)
@@ -33,6 +37,9 @@ def json_parseable(transcript: Transcript, config: dict[str, Any]) -> CheckResul
 
 @register("json_schema")
 def json_schema_checker(transcript: Transcript, config: dict[str, Any]) -> CheckResult:
+    not_exercised = unexercised_positive_rule(transcript, config)
+    if not_exercised is not None:
+        return not_exercised
     text = bounded_text(transcript.assistant_text()).strip()
     try:
         data = json.loads(text)
@@ -52,6 +59,9 @@ def json_schema_checker(transcript: Transcript, config: dict[str, Any]) -> Check
 
 @register("required_fields")
 def required_fields(transcript: Transcript, config: dict[str, Any]) -> CheckResult:
+    not_exercised = unexercised_positive_rule(transcript, config)
+    if not_exercised is not None:
+        return not_exercised
     text = bounded_text(transcript.assistant_text()).strip()
     try:
         data = json.loads(text)
@@ -67,6 +77,9 @@ def required_fields(transcript: Transcript, config: dict[str, Any]) -> CheckResu
 
 @register("enum_value")
 def enum_value(transcript: Transcript, config: dict[str, Any]) -> CheckResult:
+    not_exercised = unexercised_positive_rule(transcript, config)
+    if not_exercised is not None:
+        return not_exercised
     text = bounded_text(transcript.assistant_text()).strip()
     allowed = config.get("allowed", [])
     value: Any = text
@@ -87,6 +100,9 @@ def _looks_like_markdown(text: str) -> bool:
 
 @register("markup_format")
 def markup_format(transcript: Transcript, config: dict[str, Any]) -> CheckResult:
+    not_exercised = unexercised_positive_rule(transcript, config)
+    if not_exercised is not None:
+        return not_exercised
     text = bounded_text(transcript.assistant_text()).strip()
     fmt = config.get("format", "markdown")
     if fmt == "xml":

@@ -34,6 +34,16 @@ the report can say so (SIM-02) — INDIRECT never offers `tools` on its
 requests (it constructs the tool result itself rather than waiting for a
 live tool call), so it runs regardless of tool-calling support.
 
+Every run is decided one of two ways, and `attack_runs.verdict_tier` says
+which. TIER 1 (MECHANICAL) is every checker in `snag.checkers`, unchanged:
+a rule that has one is scored by it and by nothing else. TIER 2 (JUDGED,
+`snag.judge`) covers the rules a checker cannot express at all — the
+`checker_type = 'none'` quarter that until now was never attacked and never
+reported on — and separately reviews MECHANICAL breaks over descriptive
+phrases, where it can dispute one but never create one. Both judge passes
+are batched and both go through the same `_dispatch` budget guard as
+everything else here.
+
 After the attack matrix, the SAME scan runs a gap-probe pass (GAP-01,
 `snag.gaps`): the eight-item §8 checklist, probed once each, through this
 module's own `_dispatch` budget guard — never a second, uncapped call
@@ -61,8 +71,20 @@ from snag.attacks.library import TECHNIQUE_BY_ID, Technique, techniques_for_mode
 from snag.checkers import CheckResult, run_checker
 from snag.checkers.refusal import DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
+from snag.config import get_settings
 from snag.cost import estimate_scan_cost
 from snag.gaps import GAP_CHECKLIST, persist_gap, probe_gap
+from snag.judge import (
+    JUDGE_BATCH_SIZE,
+    DispatchFn,
+    JudgePair,
+    ReviewPair,
+    break_is_reviewable,
+    checker_intent,
+    judge_batch,
+    judge_model_for,
+    review_batch,
+)
 from snag.simulate import VARIANTS, poisoned_result, simulate_tool_result
 from substrate.db import Database
 from substrate.llm import (
@@ -109,6 +131,17 @@ SURFACE_CATEGORY_KINDS: dict[str, frozenset[str]] = {
 }
 
 VALID_SURFACE_CATEGORIES = frozenset(SURFACE_CATEGORY_KINDS)
+
+# ---------------------------------------------------------- verdict tiers
+#
+# TIER 1 is every checker in `snag.checkers` and is unchanged by the judge:
+# a rule with a mechanical checker is scored by it, only by it, and the
+# judge never originates a verdict for one. TIER 2 (`snag.judge`) exists for
+# the rules a checker cannot express at all — `checker_type` null or 'none',
+# which extraction produces for roughly a quarter of what it finds, and
+# which until now were never attacked and never reported on.
+MECHANICAL_TIER = "mechanical"
+JUDGED_TIER = "judged"
 
 # §6.2: "several innocent turns... then the ask", configurable depth,
 # default 3. Fixed and deterministic (§14).
@@ -702,20 +735,29 @@ async def _persist_attack_run(
     checker_output: str,
     evidence: str | None,
     applicable: bool = True,
-) -> None:
+    verdict_tier: str = MECHANICAL_TIER,
+) -> int:
     """`applicable=False` records a run that tested NOTHING (01-18) — the
     dispatch happened and its transcript is kept, but `snag.report` counts
     it in neither the numerator nor the denominator of any break rate, so
-    it can never be reported as "the rule held against this attack"."""
+    it can never be reported as "the rule held against this attack".
+
+    `verdict_tier` says which kind of evidence decided this row: a checker
+    from `snag.checkers` ('mechanical', the default and the trust anchor) or
+    a stronger model that had to quote the span it judged ('judged'). It
+    defaults to the mechanical tier because that is what every caller but
+    the judged pass is. Returns the new row's id, which the break-review
+    pass needs to attach a dispute to it later."""
     turns_json = [_turn_to_json(t) for t in transcript.turns]
     if evidence and turns_json:
         turns_json[-1] = {**turns_json[-1], "evidence": evidence}
-    await conn.execute(
+    run_id = await conn.fetchval(
         """INSERT INTO attack_runs
                (scan_id, rule_id, surface_id, technique_id, family, model,
                 repeat_index, conversation, passed, checker_output,
-                false_positive, planted, evidence, applicable)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12, $13)""",
+                false_positive, planted, evidence, applicable, verdict_tier)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12, $13, $14)
+           RETURNING id""",
         scan_id,
         int(rule["id"]),
         int(surface["id"]),
@@ -729,7 +771,53 @@ async def _persist_attack_run(
         _planted_text(attack),
         evidence,
         applicable,
+        verdict_tier,
     )
+    return int(run_id)
+
+
+async def _record_dispute(conn: Any, run_id: int, *, note: str, quote: str) -> None:
+    """Mark one mechanical break as DISPUTED by the judge. The row keeps its
+    `passed = false`, its checker output and its own evidence untouched —
+    a dispute is a second opinion recorded alongside the first, never an
+    overwrite of it and never a deletion. `snag.report` groups disputed
+    breaks apart and leaves them out of the headline count; the person
+    reading it settles the disagreement."""
+    await conn.execute(
+        """UPDATE attack_runs
+               SET disputed = true, dispute_note = $2, dispute_quote = $3
+           WHERE id = $1""",
+        run_id,
+        note,
+        quote,
+    )
+
+
+@dataclass(slots=True)
+class _PendingJudged:
+    """One dispatched attack on a rule with no mechanical checker, held back
+    until its batch is scored. Nothing is written for it until the verdict
+    lands: a row persisted first and updated later would be readable, for a
+    while, as a verdict nobody reached."""
+
+    attack: Attack
+    rule: Any
+    surface: Any
+    repeat_index: int
+    transcript: Transcript
+    pair: JudgePair
+
+
+@dataclass(slots=True)
+class _PendingReview:
+    """One already-persisted MECHANICAL break queued for a second opinion.
+    The row exists and stands on its own; all a review can do is attach a
+    dispute to it."""
+
+    run_id: int
+    rule_id: int
+    surface_id: int
+    pair: ReviewPair
 
 
 async def _record_technique_stats(
@@ -749,6 +837,155 @@ async def _record_technique_stats(
         surface_kind,
         1 if broke else 0,
     )
+
+
+async def _persist_unjudged(
+    db: Database,
+    scan_id: int,
+    *,
+    item: _PendingJudged,
+    state: _RunState,
+    reason: str,
+) -> None:
+    """A TIER 2 run whose reply cannot be judged at all — empty, or truncated
+    at max_tokens. There is nothing to quote, so there is nothing to judge,
+    and spending a judge call to be told so would be waste. Recorded as the
+    not-applicable third state (01-18), never as a break and never as the
+    rule holding."""
+    async with db.acquire() as conn:
+        await _persist_attack_run(
+            conn,
+            scan_id=scan_id,
+            rule=item.rule,
+            surface=item.surface,
+            attack=item.attack,
+            model=state.model,
+            repeat_index=item.repeat_index,
+            transcript=item.transcript,
+            passed=True,
+            checker_output=f"judged: {reason} — nothing to check",
+            evidence=None,
+            applicable=False,
+            verdict_tier=JUDGED_TIER,
+        )
+        state.attacks_done += 1
+    log.warning(
+        "scan.reply_not_judgeable", scan_id=scan_id, attack=item.attack.key(), reason=reason
+    )
+
+
+async def _flush_judged(
+    db: Database,
+    scan_id: int,
+    *,
+    completions: Completions,
+    judge_model: str,
+    state: _RunState,
+    pending: list[_PendingJudged],
+    dispatch: DispatchFn,
+) -> None:
+    """Score one batch of TIER 2 runs and persist them. Nothing is written
+    until the verdicts are in hand, so a run never exists in a state where
+    it looks scored and isn't. `BudgetExceeded` from `dispatch` propagates:
+    the caller stops the scan at its cap rather than persisting runs it
+    could not judge and letting the report read as though it had."""
+    if not pending:
+        return
+    verdicts = await judge_batch(
+        completions,
+        [item.pair for item in pending],
+        model=judge_model,
+        run_id=state.run_id,
+        dispatch=dispatch,
+    )
+    async with db.acquire() as conn:
+        for item, verdict in zip(pending, verdicts, strict=True):
+            broke = not verdict.passed
+            await _persist_attack_run(
+                conn,
+                scan_id=scan_id,
+                rule=item.rule,
+                surface=item.surface,
+                attack=item.attack,
+                model=state.model,
+                repeat_index=item.repeat_index,
+                transcript=item.transcript,
+                passed=verdict.passed,
+                checker_output=verdict.output,
+                # The verbatim span, stored where the report already marks a
+                # checker's evidence — so a judged break is highlighted in the
+                # transcript by exactly the same machinery, and there is no
+                # way to render one without the words it rests on.
+                evidence=verdict.quote,
+                applicable=verdict.applicable,
+                verdict_tier=JUDGED_TIER,
+            )
+            if verdict.applicable:
+                await _record_technique_stats(
+                    conn,
+                    technique_id=item.attack.technique_id,
+                    rule_category=item.rule["category"],
+                    surface_kind=item.attack.surface_kind,
+                    broke=broke,
+                )
+            state.attacks_done += 1
+            await write_progress(
+                conn,
+                scan_id,
+                kind="attack",
+                data={
+                    "technique_id": item.attack.technique_id,
+                    "rule_id": int(item.rule["id"]),
+                    "surface_id": int(item.surface["id"]),
+                    "broke": broke,
+                    "attacks_done": state.attacks_done,
+                    "cost": str(state.spend_total),
+                    "verdict_tier": JUDGED_TIER,
+                },
+                rule_id=int(item.rule["id"]),
+                surface_id=int(item.surface["id"]),
+                call_count=state.call_count,
+                cost=state.spend_total,
+                attacks_done=state.attacks_done,
+                broke=broke,
+            )
+    pending.clear()
+
+
+async def _flush_reviews(
+    db: Database,
+    *,
+    completions: Completions,
+    judge_model: str,
+    state: _RunState,
+    pending: list[_PendingReview],
+    dispatch: DispatchFn,
+) -> None:
+    """Second-opinion one batch of MECHANICAL breaks. The only write this
+    can make is a dispute attached to a row that already exists and already
+    says `passed = false`; a run it says nothing about is untouched, which
+    is also what every uncertain outcome resolves to."""
+    if not pending:
+        return
+    verdicts = await review_batch(
+        completions,
+        [item.pair for item in pending],
+        model=judge_model,
+        run_id=state.run_id,
+        dispatch=dispatch,
+    )
+    async with db.acquire() as conn:
+        for item, verdict in zip(pending, verdicts, strict=True):
+            if not verdict.disputed or not verdict.quote:
+                continue
+            await _record_dispute(conn, item.run_id, note=verdict.note, quote=verdict.quote)
+            log.info(
+                "scan.break_disputed",
+                run_id=item.run_id,
+                rule_id=item.rule_id,
+                surface_id=item.surface_id,
+            )
+    pending.clear()
 
 
 async def _mark_scan_running(db: Database, scan_id: int) -> None:
@@ -906,6 +1143,20 @@ async def _run_scan(
             "SELECT * FROM rules WHERE project_id = $1 AND testable ORDER BY id",
             scan["project_id"],
         )
+        # TIER 2: the rules no checker in the registry could express. Disjoint
+        # from `rule_rows` above by construction — a rule is inserted with
+        # `testable = (checker_type != 'none')` — so nothing is attacked
+        # twice and no rule with a mechanical checker ever reaches the judge.
+        # The `NOT testable` half also means a rule the user explicitly
+        # unticked stays untested by BOTH tiers, which is what unticking a
+        # rule is for.
+        judged_rule_rows = await conn.fetch(
+            """SELECT * FROM rules
+               WHERE project_id = $1 AND NOT testable
+                 AND (checker_type IS NULL OR checker_type = 'none')
+               ORDER BY id""",
+            scan["project_id"],
+        )
         surface_rows = await conn.fetch(
             """SELECT * FROM surfaces WHERE project_id = $1 AND confirmed AND user_controlled
                ORDER BY id""",
@@ -953,12 +1204,43 @@ async def _run_scan(
         system_prompt=system_prompt,
         model=model,
     )
+    # TIER 2's own matrix, built the same way from the same surfaces and the
+    # same technique set. `testable=True` here is `instantiate`'s "build
+    # attacks for this rule" flag, not a claim about mechanical coverage:
+    # these rules are precisely the ones without it, and the runner has
+    # decided to test them with the judge.
+    judge_model = judge_model_for(
+        model, get_settings().judge_model, get_settings().accepted_models
+    )
+    judged_attacks: list[Attack] = []
+    if judge_model is not None and judged_rule_rows:
+        judged_attacks = instantiate(
+            [
+                AttackRule(
+                    id=str(r["id"]), text=r["text"], category=r["category"],
+                    direction=r["direction"], testable=True,
+                )
+                for r in judged_rule_rows
+            ],
+            attack_surfaces,
+            techniques_for_model(model),
+            system_prompt=system_prompt,
+            model=model,
+        )
+    elif judged_rule_rows:
+        # Nothing on the allowlist can judge this scan without the target
+        # marking its own homework, so TIER 2 does not run at all. Better a
+        # rule that stays visibly unmeasured than one scored by the model
+        # that was just attacked.
+        log.warning("scan.judge_unavailable", scan_id=scan_id, model=model)
+
     if only_attacks is not None:
         wanted = set(only_attacks)
         attacks = [a for a in attacks if a.key() in wanted]
+        judged_attacks = [a for a in judged_attacks if a.key() in wanted]
 
     repeats = scan["repeats"] or 1
-    total_planned = len(attacks) * repeats
+    total_planned = (len(attacks) + len(judged_attacks)) * repeats
 
     await _mark_scan_running(db, scan_id)
 
@@ -978,13 +1260,31 @@ async def _run_scan(
         await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
         return
 
-    rule_by_id = {str(r["id"]): r for r in rule_rows}
+    rule_by_id = {str(r["id"]): r for r in (*rule_rows, *judged_rule_rows)}
     surface_by_id = {str(s["id"]): s for s in surface_rows}
 
-    for attack in attacks:
+    # Every model call in this scan — attack turns, setup, gap probes, and
+    # both judge passes — goes through `_dispatch`, so the budget guard
+    # precedes all of them (SCAN-03/T-13-01). A judge call is a model call
+    # and is capped like any other; a scan that runs out mid-judging stops
+    # and says so rather than reporting unjudged runs as judged.
+    async def _capped_dispatch(
+        client: Completions, request: CompletionRequest
+    ) -> CompletionResponse:
+        return cast(CompletionResponse, await _dispatch(client, request, state))
+
+    pending_judged: list[_PendingJudged] = []
+    pending_reviews: list[_PendingReview] = []
+
+    tiered_attacks = [(a, MECHANICAL_TIER) for a in attacks]
+    tiered_attacks += [(a, JUDGED_TIER) for a in judged_attacks]
+
+    for attack, tier in tiered_attacks:
         rule = rule_by_id[attack.rule_id]
         surface = surface_by_id[attack.surface_id]
-        checker_config = _effective_checker_config(rule, attack, setup)
+        checker_config = (
+            _effective_checker_config(rule, attack, setup) if tier == MECHANICAL_TIER else {}
+        )
         tools_for_attack = tools if attack.surface_kind == TOOL_ABUSE_KIND else None
 
         # MULTI-TURN pads every chat attack to depth >= 3 with the generic
@@ -1068,6 +1368,56 @@ async def _run_scan(
                 )
                 continue
 
+            # 01-18: never let a verdict computed over a reply that never
+            # arrived (empty, or truncated at max_tokens) be recorded as
+            # "the rule held against this attack".
+            unusable_reason = _unusable_reply_reason(final_response)
+
+            if tier == JUDGED_TIER:
+                assert judge_model is not None  # no judge, no judged attacks
+                reply = transcript.assistant_text()
+                judged_item = _PendingJudged(
+                    attack=attack,
+                    rule=rule,
+                    surface=surface,
+                    repeat_index=repeat_index,
+                    transcript=transcript,
+                    pair=JudgePair(
+                        # Unique within the batch this item will ride in —
+                        # the whole re-association contract (see
+                        # `snag.judge.JudgePair`).
+                        ref=f"j{len(pending_judged)}",
+                        rule_text=rule["text"],
+                        intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
+                        reply=reply,
+                    ),
+                )
+                if unusable_reason is not None or not reply.strip():
+                    # Nothing to quote means nothing to judge, and spending a
+                    # judge call to be told so would be waste. Recorded as the
+                    # not-applicable third state, exactly as the mechanical
+                    # tier records an unscorable reply.
+                    await _persist_unjudged(
+                        db,
+                        scan_id,
+                        item=judged_item,
+                        state=state,
+                        reason=unusable_reason or "the model returned an empty reply",
+                    )
+                    continue
+                pending_judged.append(judged_item)
+                if len(pending_judged) >= JUDGE_BATCH_SIZE:
+                    try:
+                        await _flush_judged(
+                            db, scan_id,
+                            completions=completions, judge_model=judge_model, state=state,
+                            pending=pending_judged, dispatch=_capped_dispatch,
+                        )
+                    except BudgetExceeded:
+                        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+                        return
+                continue
+
             try:
                 result = run_checker(rule["checker_type"], transcript, checker_config)
             except (KeyError, TypeError, ValueError, re.error) as exc:
@@ -1090,10 +1440,6 @@ async def _run_scan(
                 )
                 continue
 
-            # 01-18: never let a verdict computed over a reply that never
-            # arrived (empty, or truncated at max_tokens) be recorded as
-            # "the rule held against this attack".
-            unusable_reason = _unusable_reply_reason(final_response)
             result = _scored_result(result, unusable_reason)
             if not result.applicable:
                 log.warning(
@@ -1105,7 +1451,7 @@ async def _run_scan(
             broke = not result.passed
 
             async with db.acquire() as conn:
-                await _persist_attack_run(
+                run_id = await _persist_attack_run(
                     conn,
                     scan_id=scan_id,
                     rule=rule,
@@ -1157,6 +1503,66 @@ async def _run_scan(
                     broke=broke,
                 )
 
+            # TIER 2, JOB 2: queue this break for a second opinion — and only
+            # a break, only over a checker that decides a MEANING, and never
+            # over one that decides a fact (`break_is_reviewable`). The row is
+            # already written and already stands; all a review can do is
+            # attach a disagreement to it.
+            if (
+                judge_model is not None
+                and broke
+                and result.applicable
+                and break_is_reviewable(
+                    rule["checker_type"], checker_config, result.evidence
+                )
+            ):
+                pending_reviews.append(
+                    _PendingReview(
+                        run_id=run_id,
+                        rule_id=int(rule["id"]),
+                        surface_id=int(surface["id"]),
+                        pair=ReviewPair(
+                            ref=f"r{len(pending_reviews)}",
+                            rule_text=rule["text"],
+                            intent=checker_intent(
+                                rule["text"], rule["direction"], rule["category"]
+                            ),
+                            checker_note=result.output,
+                            reply=transcript.assistant_text(),
+                        ),
+                    )
+                )
+                if len(pending_reviews) >= JUDGE_BATCH_SIZE:
+                    try:
+                        await _flush_reviews(
+                            db,
+                            completions=completions, judge_model=judge_model, state=state,
+                            pending=pending_reviews, dispatch=_capped_dispatch,
+                        )
+                    except BudgetExceeded:
+                        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+                        return
+
+    # Whatever is left in either buffer after the matrix. A partial batch is
+    # still a batch — leaving it unsent would mean a run persisted as judged
+    # that nothing judged, or a break that was queued for review and quietly
+    # never reviewed.
+    if judge_model is not None:
+        try:
+            await _flush_judged(
+                db, scan_id,
+                completions=completions, judge_model=judge_model, state=state,
+                pending=pending_judged, dispatch=_capped_dispatch,
+            )
+            await _flush_reviews(
+                db,
+                completions=completions, judge_model=judge_model, state=state,
+                pending=pending_reviews, dispatch=_capped_dispatch,
+            )
+        except BudgetExceeded:
+            await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+            return
+
     # ------------------------------------------------------------ gap probes
     # GAP-01/GAP-02 (project-3-spec.md §8): after the attack matrix, probe
     # the same maintained checklist — through the SAME `_dispatch` budget
@@ -1164,9 +1570,6 @@ async def _run_scan(
     # dispatch call site (see the module's own structural test in
     # test_budget_caps.py, which greps this module for how many times its
     # ONE completions call method is invoked).
-    async def _gap_dispatch(client: Completions, request: CompletionRequest) -> CompletionResponse:
-        return cast(CompletionResponse, await _dispatch(client, request, state))
-
     for item in GAP_CHECKLIST:
         try:
             gap_result = await probe_gap(
@@ -1176,7 +1579,7 @@ async def _run_scan(
                 model=model,
                 system_prompt=system_prompt,
                 tools=tools,
-                dispatch=_gap_dispatch,
+                dispatch=_capped_dispatch,
             )
         except BudgetExceeded:
             await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
@@ -1227,7 +1630,6 @@ async def run_scan_worker(*, concurrency: int = 1, drain: bool = True) -> Worker
     `require_funding`) but is executed here with the owner key — a scoped
     decision for 01-09, documented in its SUMMARY.
     """
-    from snag.config import get_settings
     from substrate.llm.factory import build_completions
 
     settings = get_settings()

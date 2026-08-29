@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     forces this to a member of it — this hardcoded value only matters for
     local/dev runs with no ACCEPTED_MODELS set at all."""
 
+    judge_model: str = "openai/gpt-5.6-luna"
+    """The TIER 2 judge (`snag.judge`): the model that scores rules no
+    mechanical checker covers, and reviews mechanical breaks over
+    descriptive phrases. Deliberately the STRONGEST model on the allowlist
+    rather than the cheapest — it is asked semantic questions the target
+    model is expected to get wrong, and it runs a handful of batched times
+    per scan, not once per attack. Never used against a scan whose target IS
+    this model (`snag.judge.judge_model_for`): a model grading its own
+    homework is a known bias, not a saving."""
+
     accepted_models: Annotated[list[str], NoDecode] = []
     """KEY-03: only these OpenRouter models may ever be dispatched to when
     non-empty (`snag.api.deps.validate_model` enforces this server-side;
@@ -82,9 +92,13 @@ class Settings(BaseSettings):
         """KEY-03: the default model must never be a value `validate_model`
         would itself reject. Falls back to `accepted_models[0]` rather than
         raising, so a stale `DEFAULT_MODEL` env var can't crash startup —
-        the allowlist wins the disagreement silently and predictably."""
+        the allowlist wins the disagreement silently and predictably. The
+        judge is dispatched to like any other model, so it is held to the
+        same allowlist by the same rule."""
         if self.accepted_models and self.default_model not in self.accepted_models:
             self.default_model = self.accepted_models[0]
+        if self.accepted_models and self.judge_model not in self.accepted_models:
+            self.judge_model = self.accepted_models[0]
         return self
 
     @property

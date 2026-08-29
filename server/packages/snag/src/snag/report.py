@@ -26,6 +26,22 @@ itself is out of scope for this plan, so a freshly-inserted rescan row
 always starts with its OWN `false_positive = false` — this module, not the
 row, is what remembers the exclusion.
 
+Two tiers, never mixed. Every `Break` and every variant carries
+`verdictTier`: 'mechanical' when a checker from `snag.checkers` decided it —
+the trust anchor, unchanged — and 'judged' when no checker could express the
+rule and a stronger model scored it instead, in which case `quote` carries
+the span of the reply the verdict rests on, checked character for character
+before it was stored. `byTier` counts the two apart so a headline never
+flattens a model's opinion into a checker's result.
+
+A DISPUTED break is a mechanical break the judge, on review, believes the
+checker misread — a denial or a hypothetical a text search counted as an
+assertion. It stays in `breaks[]`, keeps its transcript and its checker
+output, and carries `disputeNote`/`disputeQuote`; it is only kept out of
+`rule.breaks`, `bySurface` and the headline count. Deleting a real break to
+make a report look clean would be the same dishonesty as reporting a fake
+one.
+
 Honest coverage (01-18): a stored run with `applicable = false` tested
 nothing — a canary checker handed an attack that planted no canary, or a
 reply that came back empty/truncated — and `_counted` drops it before ANY
@@ -51,6 +67,13 @@ log = structlog.get_logger(__name__)
 # is the one and only reason (`snag.extract` never records `checkerType ==
 # "none"` for any other cause).
 UNTESTABLE_REASON = "Snag's extractor could not derive a mechanical checker for this rule."
+
+# The same rule once TIER 2 has actually attacked and scored it: still no
+# checker, so still not the trust anchor, but no longer unmeasured.
+JUDGED_REASON = (
+    "No mechanical checker fits this rule, so a stronger model judged it — "
+    "and had to quote the sentence its verdict rests on."
+)
 
 # `Break.id`/the `{break_id}` path param are both `f"b{attack_run.id}"` —
 # the smallest attack_run id in a (rule, surface, technique) group, chosen
@@ -106,6 +129,17 @@ def _last_assistant_text(conversation: list[dict[str, Any]] | None) -> str:
     return ""
 
 
+MECHANICAL_TIER = "mechanical"
+JUDGED_TIER = "judged"
+
+
+def _tier(run: asyncpg.Record) -> str:
+    """Which kind of evidence decided this run. Rows written before the
+    column existed are mechanical by definition — that is what the
+    migration's backfill says — so a NULL reads as mechanical here too."""
+    return str(run["verdict_tier"] or MECHANICAL_TIER)
+
+
 def _variant_for_run(run: asyncpg.Record) -> dict[str, Any]:
     """One real repeat -> one `Break.variants[]` entry. `reply`/`evidence`
     match the `{broke, reply, evidence}` shape `src/data/types.ts` already
@@ -123,9 +157,20 @@ def _variant_for_run(run: asyncpg.Record) -> dict[str, Any]:
         "checkerOutput": run["checker_output"] or "",
         "repeatIndex": run["repeat_index"],
         "runId": run["id"],
+        "verdictTier": _tier(run),
     }
     if broke and run["evidence"]:
         variant["evidence"] = run["evidence"]
+    if _tier(run) == JUDGED_TIER and run["evidence"]:
+        # The span the judge quoted, checked against the reply character for
+        # character before it was ever stored (`snag.judge`). A judged
+        # verdict is only readable because this is here, so it is surfaced
+        # under its own name rather than left to be inferred from `evidence`.
+        variant["quote"] = run["evidence"]
+    if run["disputed"]:
+        variant["disputed"] = True
+        variant["disputeNote"] = run["dispute_note"] or ""
+        variant["disputeQuote"] = run["dispute_quote"] or ""
     return variant
 
 
@@ -146,9 +191,14 @@ def _build_break_entry(
     runs_sorted = sorted(runs, key=lambda r: (r["repeat_index"], r["id"]))
     hits = sum(1 for r in runs_sorted if not r["passed"])
     broken_runs = [r for r in runs_sorted if not r["passed"]]
-    representative = broken_runs[0] if broken_runs else runs_sorted[0]
+    # A run the judge disputed still broke, and is still shown — the dispute
+    # is a second opinion recorded next to the checker's, not a deletion. It
+    # is only kept out of the counts the headline is built from.
+    disputed_hits = sum(1 for r in broken_runs if r["disputed"])
+    undisputed = [r for r in broken_runs if not r["disputed"]]
+    representative = (undisputed or broken_runs or runs_sorted)[0]
     rule_id, surface_id, technique_id = key
-    return {
+    entry: dict[str, Any] = {
         "id": _break_id([r["id"] for r in runs_sorted]),
         "ruleId": str(rule_id) if rule_id is not None else "",
         "surfaceId": str(surface_id) if surface_id is not None else "",
@@ -159,8 +209,19 @@ def _build_break_entry(
         "turns": representative["conversation"] or [],
         "checkerOutput": representative["checker_output"] or "",
         "falsePositive": excluded,
+        "verdictTier": _tier(representative),
+        "disputedHits": disputed_hits,
+        # The whole group is disputed only when EVERY break in it is. One
+        # undisputed repeat is enough for the finding to stand.
+        "disputed": hits > 0 and disputed_hits == hits,
         "variants": [_variant_for_run(r) for r in runs_sorted],
     }
+    if _tier(representative) == JUDGED_TIER and representative["evidence"]:
+        entry["quote"] = representative["evidence"]
+    if entry["disputed"]:
+        entry["disputeNote"] = representative["dispute_note"] or ""
+        entry["disputeQuote"] = representative["dispute_quote"] or ""
+    return entry
 
 
 def _build_breaks(
@@ -245,10 +306,16 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
     for break_entry in breaks:
         if break_entry["falsePositive"]:
             continue
+        # A disputed repeat is out of the counts but still in `breaks[]` —
+        # the report groups it separately and shows the judge's reasoning
+        # rather than quietly dropping a finding to look clean.
+        counted_hits = break_entry["hits"] - break_entry["disputedHits"]
+        if counted_hits <= 0:
+            continue
         if break_entry["ruleId"]:
-            breaks_by_rule[int(break_entry["ruleId"])] += break_entry["hits"]
+            breaks_by_rule[int(break_entry["ruleId"])] += counted_hits
         if break_entry["surfaceId"]:
-            hits_by_surface[int(break_entry["surfaceId"])] += break_entry["hits"]
+            hits_by_surface[int(break_entry["surfaceId"])] += counted_hits
 
     rules = []
     for row in rule_rows:
@@ -266,8 +333,15 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
             "attacks": attacks_by_rule.get(rid, 0),
             "breaks": breaks_by_rule.get(rid, 0),
         }
+        entry["verdictTier"] = (
+            JUDGED_TIER if row["checker_type"] in (None, "none") else MECHANICAL_TIER
+        )
         if not row["testable"]:
-            entry["untestableReason"] = UNTESTABLE_REASON
+            entry["untestableReason"] = (
+                JUDGED_REASON
+                if entry["verdictTier"] == JUDGED_TIER and attacks_by_rule.get(rid, 0)
+                else UNTESTABLE_REASON
+            )
         rules.append(entry)
 
     surfaces = [
@@ -324,7 +398,26 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         "indicativeOnly": bool(scan_row) and (repeats or 0) <= 1,
     }
 
-    breaks_found = sum(1 for r in run_rows if not r["passed"])
+    breaks_found = sum(1 for r in run_rows if not r["passed"] and not r["disputed"])
+
+    # REPORT: which tier found what, counted apart, so the headline can say
+    # "3 broke, 1 judged" instead of flattening a model's opinion into a
+    # checker's result. `disputed` is the other direction — mechanical
+    # breaks the judge believes the checker misread — and is reported as its
+    # own number rather than silently subtracted from the mechanical one.
+    by_tier: dict[str, Any] = {
+        MECHANICAL_TIER: {"attacks": 0, "breaks": 0},
+        JUDGED_TIER: {"attacks": 0, "breaks": 0},
+        "disputed": 0,
+    }
+    for run in run_rows:
+        bucket = by_tier[_tier(run)]
+        bucket["attacks"] += 1
+        if not run["passed"]:
+            if run["disputed"]:
+                by_tier["disputed"] += 1
+            else:
+                bucket["breaks"] += 1
 
     # Report.tsx unconditionally reads history[0] — always give it one row,
     # even before any scan has run, so the existing JSX never crashes on
@@ -414,6 +507,7 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         # gives 01-16 a ready-made value to render straight from the wire.
         "coverage": coverage,
         "bySurface": by_surface,
+        "byTier": by_tier,
     }
 
 

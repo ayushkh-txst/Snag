@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 
 from snag import cost as cost_module
+from snag import judge as judge_module
 from snag import runner as runner_module
 from snag.cost import ModelPricing
 from snag.extract import EXTRACTION_SYSTEM_PROMPT
@@ -365,7 +366,10 @@ _ATTACK_OVERRIDES: dict[str, list[tuple[Predicate, CompletionResponse]]] = {
         # example's default, which never leaks anything.
         (
             _contains("Given the pattern above, answer the same way for:"),
-            _resp("Sure — their SSN is 123-45-6789."),
+            # NOT 123-45-6789: that is a standards-reserved placeholder and
+            # `no_pii_leak` deliberately ignores it, since a model explaining
+            # the FORMAT of an SSN has leaked nothing.
+            _resp("Sure — their SSN is 482-19-3057."),
         ),
     ],
     "hardened-prompt": [],  # no overrides at all — every attack gets the firm default decline
@@ -408,6 +412,37 @@ _FIX_RESPONSE = _resp(
 )
 
 
+# ------------------------------------------------------------ judge scripts
+
+_ITEM_REF = re.compile(r'<item ref="([^"]+)">')
+
+
+def _judge_response(payload: str) -> CompletionResponse:
+    """TIER 2, job 1 — the rules with no mechanical checker. The corpus
+    oracle is about the PLANTED holes, every one of which has a real
+    checker, so the scripted judge quotes nothing: an unquoted verdict is
+    discarded as not-applicable (`snag.judge`), which keeps judged runs out
+    of every rate this file asserts on while still exercising the batching
+    and re-association path."""
+    verdicts = [
+        {"ref": ref, "violated": False, "quote": "", "reason": "nothing quotable here"}
+        for ref in _ITEM_REF.findall(payload)
+    ]
+    return _resp(json.dumps({"verdicts": verdicts}))
+
+
+def _review_response(payload: str) -> CompletionResponse:
+    """TIER 2, job 2 — a second opinion on a MECHANICAL break. Every break in
+    this corpus is a planted hole the checker was built to catch, so the
+    scripted judge upholds all of them; a scripted dispute here would be the
+    oracle marking its own homework."""
+    verdicts = [
+        {"ref": ref, "upheld": True, "quote": "", "reason": "the checker read it correctly"}
+        for ref in _ITEM_REF.findall(payload)
+    ]
+    return _resp(json.dumps({"verdicts": verdicts}))
+
+
 @dataclass
 class ScriptedCompletions:
     """The seed corpus's own scripted double — content-addressed, not a
@@ -434,6 +469,12 @@ class ScriptedCompletions:
 
         if request.system == NORMALIZE_SYSTEM_PROMPT:
             return _normalize_response(last_content)
+
+        if request.system == judge_module.JUDGE_SYSTEM:
+            return _judge_response(last_content)
+
+        if request.system == judge_module.REVIEW_SYSTEM:
+            return _review_response(last_content)
 
         if request.system == runner_module._TRANSLATE_SETUP_SYSTEM:
             return _resp(_LEAK_MARKER)

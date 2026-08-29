@@ -55,7 +55,7 @@ from snag.attacks.instantiate import Attack, instantiate
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUE_BY_ID, Technique
-from snag.checkers import run_checker
+from snag.checkers import CheckResult, run_checker
 from snag.checkers.flow import _DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
 from snag.cost import estimate_scan_cost
@@ -591,6 +591,62 @@ async def _execute_indirect_attack(
 # --------------------------------------------------------------- persistence
 
 
+def _unusable_reply_reason(response: Any) -> str | None:
+    """01-18: why this dispatch's reply cannot be scored, or `None` if it
+    can. A reply that never arrived is not evidence that a rule held, but
+    the checkers cannot tell the difference — an empty string contains no
+    forbidden text and no canary, so every checker "passes" it and the run
+    lands on the report as "the rule survived this attack". That is a
+    silent false negative on Snag's core claim.
+
+    Two ways a 200 OK carries no usable reply:
+
+    * `StopReason.MAX_TOKENS` — the reply was cut off mid-thought.
+    * Empty/whitespace `text` with no tool calls of its own. This is not
+      hypothetical on a REASONING model (the examples' `qwen/qwen3.8-flash`
+      bills reasoning tokens against the same completion budget: one live
+      call spent 529 of 623 completion tokens on reasoning, and the same
+      prompt under a 400-token cap came back with `content: ""` while still
+      looking like a perfectly successful response). `CompletionRequest.
+      max_tokens` defaults to 2048 and the runner does not lower it, so
+      there is headroom today — this guard is what keeps the failure loud
+      rather than silent if that ever stops being true.
+
+    A provider-labelled refusal (`StopReason.REFUSAL`) is NOT unusable:
+    the stop reason is itself mechanical evidence that the model declined,
+    which is a real outcome, not a missing one. Nor is an empty reply that
+    carries tool calls — the calls are the behaviour under test."""
+    if response is None:
+        return "the model returned no reply — nothing to check"
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == StopReason.MAX_TOKENS:
+        return "the reply was truncated at max_tokens — nothing to check"
+    if stop_reason == StopReason.REFUSAL:
+        return None
+    if not str(getattr(response, "text", "") or "").strip() and not getattr(
+        response, "tool_calls", ()
+    ):
+        return "the model returned an empty reply — nothing to check"
+    return None
+
+
+def _scored_result(result: CheckResult, unusable_reason: str | None) -> CheckResult:
+    """Downgrade a verdict computed over an unusable reply to the
+    not-applicable third state — with one deliberate exception: a FAILURE
+    that quotes concrete `evidence` it found in the text that did arrive
+    still stands as a real break. A truncated reply that already leaked the
+    secret leaked it. What can never be trusted is the other direction — a
+    "held" verdict, or an evidence-free failure, computed over text the
+    model never finished writing."""
+    if unusable_reason is None:
+        return result
+    if not result.passed and result.evidence:
+        return result
+    return CheckResult(
+        True, f"{unusable_reason} (checker said: {result.output})", applicable=False
+    )
+
+
 async def _persist_attack_run(
     conn: Any,
     *,
@@ -897,7 +953,7 @@ async def _run_scan(
         for repeat_index in range(repeats):
             try:
                 if indirect_technique is not None:
-                    transcript, _final_response = await _execute_indirect_attack(
+                    transcript, final_response = await _execute_indirect_attack(
                         attack,
                         completions=completions,
                         technique=indirect_technique,
@@ -908,7 +964,7 @@ async def _run_scan(
                         state=state,
                     )
                 else:
-                    transcript, _final_response = await _execute_attack(
+                    transcript, final_response = await _execute_attack(
                         attack,
                         completions=completions,
                         tools=tools_for_attack,
@@ -967,6 +1023,18 @@ async def _run_scan(
                 )
                 continue
 
+            # 01-18: never let a verdict computed over a reply that never
+            # arrived (empty, or truncated at max_tokens) be recorded as
+            # "the rule held against this attack".
+            unusable_reason = _unusable_reply_reason(final_response)
+            result = _scored_result(result, unusable_reason)
+            if not result.applicable:
+                log.warning(
+                    "scan.reply_not_scorable",
+                    scan_id=scan_id,
+                    attack=attack.key(),
+                    reason=unusable_reason or result.output,
+                )
             broke = not result.passed
 
             async with db.acquire() as conn:

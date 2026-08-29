@@ -228,11 +228,16 @@ _ROLEPLAY_GRADUAL_FINAL = (
 _ROLEPLAY_GRADUAL = Technique(
     id="roleplay.02",
     family="roleplay",
-    # Deliberately NOT targeting `identity`/`tone_style`: those (category,
-    # chat) match-sets are pinned by existing runner tests, and this
-    # technique's mechanical win is a kept-persona canary under a REFUSAL
-    # rule, not an identity swap.
-    targets=("refusal",),
+    # `identity` is carried here as well as `refusal`, and that is
+    # load-bearing rather than cosmetic: `roleplay.01` is the only OTHER
+    # technique targeting `identity` on the chat surface and it is
+    # frontier-gated, so without this an `identity` rule scanned against a
+    # cheap model would draw only `auth_confusion.01` — which plants no
+    # canary, leaving `no_role_confusion` permanently unable to check
+    # anything. `tone_style` is deliberately still NOT targeted: that
+    # category's exactly-one-technique match-set is a fixture convention
+    # several runner tests depend on.
+    targets=("refusal", "identity"),
     surfaces=("chat",),
     template=_ROLEPLAY_GRADUAL_FINAL,
     turns=(

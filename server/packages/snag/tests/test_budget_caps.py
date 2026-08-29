@@ -18,6 +18,7 @@ from snag import runner
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.instantiate import instantiate
+from snag.attacks.library import techniques_for_model
 from snag.cost import ModelPricing
 from snag.gaps import GAP_CHECKLIST
 from substrate.db import Database
@@ -40,15 +41,22 @@ def _prime_pricing_cache() -> Iterator[None]:
 
 async def _make_scannable_project(db: Database, *, slug: str) -> tuple[int, int]:
     """One rule/one surface whose category+kind matches EXACTLY ONE
-    single-turn technique (`roleplay.01`, via category="tone_style" on the
+    single-turn technique (`debug_pretext.01`, via category="format" on the
     `chat` surface) — so `len(attacks) == 1` and every repeat is exactly one
-    dispatch, making the exact call count fully predictable."""
+    dispatch, making the exact call count fully predictable.
+
+    `format` rather than `tone_style` since profile gating landed: the only
+    `tone_style` technique (`roleplay.01`) is frontier-gated, so it does not
+    run against this file's cheap MODEL at all. `format` is the one category
+    that matches exactly one single-turn ungated technique — pinned by
+    `test_attacks_library.py::test_format_is_the_exactly_one_technique_fixture_category`
+    so this convention cannot rot silently."""
     async with db.acquire() as conn:
         await conn.execute("INSERT INTO projects (id, model) VALUES ($1, $2)", slug, MODEL)
         rule_id = await conn.fetchval(
             """INSERT INTO rules (project_id, text, category, direction, checker_type,
                                    checker_config, testable)
-               VALUES ($1, 'never break character', 'tone_style', 'negative',
+               VALUES ($1, 'always reply in the house format', 'format', 'negative',
                        'forbidden_text', $2, true) RETURNING id""",
             slug,
             {"strings": ["this-never-matches-anything"]},
@@ -59,8 +67,9 @@ async def _make_scannable_project(db: Database, *, slug: str) -> tuple[int, int]
             slug,
         )
     attacks = instantiate(
-        [AttackRule(id=str(rule_id), text="x", category="tone_style", direction="negative")],
+        [AttackRule(id=str(rule_id), text="x", category="format", direction="negative")],
         [AttackSurface(id=str(surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
     assert len(attacks) == 1  # the whole point of this fixture's exact-count guarantee
     assert not isinstance(attacks[0].prompt_or_turns, tuple)  # single-turn
@@ -221,6 +230,7 @@ async def test_budget_exceeded_mid_multi_turn_attack_does_not_persist_a_partial_
     attacks = instantiate(
         [AttackRule(id=str(rule_id), text="x", category="scope_boundary", direction="negative")],
         [AttackSurface(id=str(surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
     multi_turn = [a for a in attacks if isinstance(a.prompt_or_turns, tuple)]
     assert multi_turn, "fixture assumption: scope_boundary/chat matches a multi-turn technique"

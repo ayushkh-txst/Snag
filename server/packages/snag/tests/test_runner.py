@@ -25,7 +25,7 @@ from snag import runner
 from snag.attacks.instantiate import Attack, instantiate
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
-from snag.attacks.library import TECHNIQUES, RuleCategory, SurfaceKind
+from snag.attacks.library import TECHNIQUES, RuleCategory, SurfaceKind, techniques_for_model
 from snag.checkers import CheckResult
 from snag.cost import ModelPricing
 from snag.gaps import GAP_CHECKLIST
@@ -46,6 +46,12 @@ DrainScanQueue = Callable[[Database, Completions], Awaitable[Worker]]
 
 MODEL = "qwen/qwen3.8-flash"
 _KNOWN_TECHNIQUE_IDS = {t.id for t in TECHNIQUES}
+# Every local `instantiate()` in this file mirrors what the runner itself
+# builds, so it must apply the same profile gate the runner applies
+# (`_run_scan` -> `techniques_for_model(model)`): MODEL is a cheap target,
+# so frontier-gated techniques never run and must not be counted here
+# either.
+_TECHNIQUES = techniques_for_model(MODEL)
 
 
 @pytest.fixture(autouse=True)
@@ -294,15 +300,16 @@ async def test_worker_registers_kind_scan_and_drains_an_enqueued_job_end_to_end(
     rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["nope-never-matches-xyz"]},
     )
     chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
 
     expected = instantiate(
-        [_attack_rule(rule_id, "tone_style")],
+        [_attack_rule(rule_id, "format")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     fake.responses.extend(
         _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
@@ -335,7 +342,7 @@ async def test_scan_handler_persists_attack_runs_across_rules_surfaces_and_repea
     rule1_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["nope-never-matches-xyz"]},
     )
@@ -351,7 +358,7 @@ async def test_scan_handler_persists_attack_runs_across_rules_surfaces_and_repea
 
     expected = instantiate(
         [
-            _attack_rule(rule1_id, "tone_style"),
+            _attack_rule(rule1_id, "format"),
             AttackRule(
                 id=str(rule2_id), text="x", category="tool_authorization", direction="negative"
             ),
@@ -360,6 +367,7 @@ async def test_scan_handler_persists_attack_runs_across_rules_surfaces_and_repea
             _attack_surface(chat_id, kind="chat", path="user message"),
             _attack_surface(tool_id, kind="tool_param", path="issue_refund.amount"),
         ],
+        _TECHNIQUES,
     )
     assert len(expected) >= 2  # a real matrix, not a single coincidental match
     repeats = 2
@@ -410,6 +418,7 @@ async def test_direct_and_tool_abuse_surfaces_are_both_exercised(
             _attack_surface(chat_id, kind="chat", path="user message"),
             _attack_surface(tool_id, kind="tool_param", path="issue_refund.amount"),
         ],
+        _TECHNIQUES,
     )
     fake.responses.extend(
         _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
@@ -442,15 +451,16 @@ async def test_scan_handler_persists_a_refusal_as_a_normal_run_not_an_error(
     rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["nope-never-matches-xyz"]},
     )
     chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
 
     expected = instantiate(
-        [_attack_rule(rule_id, "tone_style")],
+        [_attack_rule(rule_id, "format")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     fake.responses.extend(
         CompletionResponse(
@@ -495,7 +505,7 @@ async def test_a_checker_config_mismatch_skips_that_attack_without_failing_the_s
     fine_rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["nope-never-matches-xyz"]},
     )
@@ -504,14 +514,16 @@ async def test_a_checker_config_mismatch_skips_that_attack_without_failing_the_s
     expected = instantiate(
         [
             _attack_rule(broken_rule_id, "content_prohibition"),
-            _attack_rule(fine_rule_id, "tone_style"),
+            _attack_rule(fine_rule_id, "format"),
         ],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     broken_count = len(
         instantiate(
             [_attack_rule(broken_rule_id, "content_prohibition")],
             [_attack_surface(chat_id, kind="chat", path="user message")],
+            _TECHNIQUES,
         )
     )
     assert broken_count > 0 and len(expected) > broken_count  # both rules actually attacked
@@ -547,15 +559,16 @@ async def test_technique_stats_persist_counts_only_and_never_prompt_text(
     rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["BANANA123"]},
     )
     chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
 
     expected = instantiate(
-        [_attack_rule(rule_id, "tone_style")],
+        [_attack_rule(rule_id, "format")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     repeats = 3
     fake.responses.extend(
@@ -574,7 +587,7 @@ async def test_technique_stats_persist_counts_only_and_never_prompt_text(
     assert sum(r["attempts"] for r in stats_rows) == len(expected) * repeats
     for row in stats_rows:
         assert row["technique_id"] in _KNOWN_TECHNIQUE_IDS
-        assert row["rule_category"] == "tone_style"
+        assert row["rule_category"] == "format"
         assert row["surface_kind"] == "chat"
         # PRIV-03: nothing here can even shape-check as prompt text — every
         # column is a fixed, short, categorical identifier.
@@ -606,6 +619,7 @@ async def test_run_scan_handler_only_attacks_seam_runs_just_that_subset(
     all_attacks = instantiate(
         [_attack_rule(rule_id, "tool_authorization")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     assert len(all_attacks) >= 2  # tool_authorization + chat matches several techniques
     target = all_attacks[0]
@@ -634,12 +648,17 @@ async def test_run_scan_handler_only_attacks_seam_runs_just_that_subset(
 async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
     client_factory: ClientFactory, clean_db: Database, drain_scan_queue: DrainScanQueue
 ) -> None:
-    """The live finding: `identity` rules match both `roleplay.01` (which
-    plants a canary) and `auth_confusion.01` (which plants none) on the chat
-    surface. The canary-less pairing gives `no_role_confusion` nothing to
-    check, and used to be stored `passed = true` — counted as an attack the
-    rule survived, inflating the denominator of its break rate and the
-    scan's attack count. It must be stored as not applicable instead."""
+    """The live finding: `identity` rules match both a canary-planting
+    roleplay technique and `auth_confusion.01` (which plants none) on the
+    chat surface. The canary-less pairing gives `no_role_confusion` nothing
+    to check, and used to be stored `passed = true` — counted as an attack
+    the rule survived, inflating the denominator of its break rate and the
+    scan's attack count. It must be stored as not applicable instead.
+
+    The canary-planting half is `roleplay.02` here rather than `roleplay.01`:
+    against this file's cheap MODEL the one-shot-persona `roleplay.01` is
+    frontier-gated out entirely (`techniques_for_model`), and the gradual
+    persona-induction `roleplay.02` is what a small target actually draws."""
     fake = FakeCompletions()
     slug = "proj-noop-canary"
     await _make_project(clean_db, slug=slug)
@@ -651,8 +670,9 @@ async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
     expected = instantiate(
         [_attack_rule(rule_id, "identity")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
-    assert {a.technique_id for a in expected} == {"roleplay.01", "auth_confusion.01"}
+    assert {a.technique_id for a in expected} == {"roleplay.02", "auth_confusion.01"}
     fake.responses.extend(
         _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
     )
@@ -670,10 +690,10 @@ async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
         }
     # Both runs are still STORED — the dispatch really happened and its
     # transcript is worth keeping — but only one of them tested anything.
-    assert set(runs) == {"roleplay.01", "auth_confusion.01"}
+    assert set(runs) == {"roleplay.02", "auth_confusion.01"}
     assert runs["auth_confusion.01"]["applicable"] is False
     assert runs["auth_confusion.01"]["passed"] is True  # never counted as a break either
-    assert runs["roleplay.01"]["applicable"] is True
+    assert runs["roleplay.02"]["applicable"] is True
 
     # ...and the report counts one attack for this rule, not two.
     report = await aggregate_report(clean_db, slug)
@@ -688,7 +708,7 @@ async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
         stats = {r["technique_id"]: r["attempts"] for r in await conn.fetch(
             "SELECT * FROM technique_stats"
         )}
-    assert stats == {"roleplay.01": 1}
+    assert stats == {"roleplay.02": 1}
 
 
 async def test_an_empty_model_reply_is_not_counted_as_an_attack_the_rule_survived(
@@ -708,15 +728,16 @@ async def test_an_empty_model_reply_is_not_counted_as_an_attack_the_rule_survive
     rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["never-matches-anything-xyz"]},
     )
     chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
 
     expected = instantiate(
-        [_attack_rule(rule_id, "tone_style")],
+        [_attack_rule(rule_id, "format")],
         [_attack_surface(chat_id, kind="chat", path="user message")],
+        _TECHNIQUES,
     )
     empty = CompletionResponse(
         text="", usage=TokenUsage(800, 623), stop_reason=StopReason.END_TURN, model=MODEL

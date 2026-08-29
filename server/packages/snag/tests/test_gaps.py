@@ -23,6 +23,7 @@ from snag import runner
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.instantiate import instantiate
+from snag.attacks.library import techniques_for_model
 from snag.cost import ModelPricing
 from snag.gaps import (
     GAP_CHECKLIST,
@@ -107,7 +108,7 @@ async def _add_rule(db: Database, slug: str) -> int:
         rule_id = await conn.fetchval(
             """INSERT INTO rules (project_id, text, category, direction, checker_type,
                                    checker_config, testable)
-               VALUES ($1, 'never break character', 'tone_style', 'negative',
+               VALUES ($1, 'always reply in the house format', 'format', 'negative',
                        'forbidden_text', $2, true) RETURNING id""",
             slug,
             {"strings": ["this-never-matches-anything"]},
@@ -127,8 +128,9 @@ async def _add_chat_surface(db: Database, slug: str) -> int:
 
 def _single_chat_attack_count(db_rule_id: int, db_surface_id: int) -> int:
     attacks = instantiate(
-        [AttackRule(id=str(db_rule_id), text="x", category="tone_style", direction="negative")],
+        [AttackRule(id=str(db_rule_id), text="x", category="format", direction="negative")],
         [AttackSurface(id=str(db_surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
     assert len(attacks) == 1  # fixture assumption, mirrors test_budget_caps.py
     return len(attacks)

@@ -22,7 +22,7 @@ from snag import runner
 from snag.attacks.instantiate import Attack, instantiate
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
-from snag.attacks.library import TECHNIQUE_BY_ID
+from snag.attacks.library import TECHNIQUE_BY_ID, techniques_for_model
 from snag.cost import ModelPricing
 from snag.gaps import GAP_CHECKLIST
 from snag.simulate import simulate_tool_result
@@ -207,17 +207,20 @@ async def test_multiturn_pads_a_single_turn_technique_to_the_minimum_depth(
     rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["this-never-matches-anything"]},
     )
     surface_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
 
     attacks = instantiate(
-        [AttackRule(id=str(rule_id), text="x", category="tone_style", direction="negative")],
+        [AttackRule(id=str(rule_id), text="x", category="format", direction="negative")],
         [AttackSurface(id=str(surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
-    assert len(attacks) == 1  # tone_style/chat matches exactly roleplay.01
+    # format/chat matches exactly debug_pretext.01 — the one category that
+    # matches a single single-turn technique under profile gating too.
+    assert len(attacks) == 1
     attack = attacks[0]
     assert not isinstance(attack.prompt_or_turns, tuple)  # single-turn, before padding
 
@@ -261,6 +264,7 @@ async def test_multiturn_leaves_an_already_deep_scripted_technique_unpadded(
     attacks = instantiate(
         [AttackRule(id=str(rule_id), text="x", category="scope_boundary", direction="negative")],
         [AttackSurface(id=str(surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
     multi_turn = [a for a in attacks if isinstance(a.prompt_or_turns, tuple)]
     assert multi_turn, "fixture assumption: scope_boundary/chat matches a scripted multi-turn one"
@@ -303,6 +307,7 @@ async def test_tool_abuse_feeds_back_a_schema_shaped_simulated_result(
     attacks = instantiate(
         [AttackRule(id=str(rule_id), text="x", category="tool_authorization")],
         [AttackSurface(id=str(surface_id), kind="tool_param", path="issue_refund.amount")],
+        techniques_for_model(MODEL),
     )
     attack: Attack = attacks[0]
 
@@ -345,6 +350,7 @@ async def test_positive_direction_tool_abuse_passes_on_refusal_with_no_tool_fire
             )
         ],
         [AttackSurface(id=str(surface_id), kind="tool_param", path="issue_refund.amount")],
+        techniques_for_model(MODEL),
     )
     technique_ids = {a.technique_id for a in attacks}
     assert "authority_claim.01" in technique_ids
@@ -387,6 +393,7 @@ async def test_positive_direction_tool_abuse_fails_when_the_tool_fires_anyway(
             )
         ],
         [AttackSurface(id=str(surface_id), kind="tool_param", path="issue_refund.amount")],
+        techniques_for_model(MODEL),
     )
     attack = next(a for a in attacks if a.technique_id == "authority_claim.01")
 
@@ -437,6 +444,7 @@ async def _make_indirect_scan(
     attacks = instantiate(
         [AttackRule(id=str(rule_id), text="x", category="content_prohibition")],
         [indirect_surface],
+        techniques_for_model(MODEL),
     )
     attack = next(a for a in attacks if a.technique_id == "continuation.01")
 
@@ -557,7 +565,7 @@ async def test_tool_less_model_skips_tool_abuse_and_records_the_note_while_direc
     direct_rule_id = await _add_rule(
         clean_db,
         slug,
-        category="tone_style",
+        category="format",
         checker_type="forbidden_text",
         checker_config={"strings": ["this-never-matches-anything"]},
     )
@@ -573,13 +581,14 @@ async def test_tool_less_model_skips_tool_abuse_and_records_the_note_while_direc
 
     all_attacks = instantiate(
         [
-            AttackRule(id=str(direct_rule_id), text="x", category="tone_style"),
+            AttackRule(id=str(direct_rule_id), text="x", category="format"),
             AttackRule(id=str(tool_rule_id), text="x", category="tool_authorization"),
         ],
         [
             AttackSurface(id=str(chat_id), kind="chat", path="user message"),
             AttackSurface(id=str(tool_id), kind="tool_param", path="issue_refund.amount"),
         ],
+        techniques_for_model(MODEL),
     )
     direct_attack = next(a for a in all_attacks if a.surface_kind == "chat")
     tool_attack = next(

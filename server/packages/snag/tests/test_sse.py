@@ -26,6 +26,7 @@ from snag.api.sse import TERMINAL_STATUSES, scan_event_stream
 from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.instantiate import instantiate
+from snag.attacks.library import techniques_for_model
 from snag.cost import ModelPricing
 from snag.gaps import GAP_CHECKLIST
 from substrate.db import Database
@@ -238,7 +239,7 @@ async def _make_single_attack_project(db: Database, *, slug: str) -> tuple[int, 
         rule_id = await conn.fetchval(
             """INSERT INTO rules (project_id, text, category, direction, checker_type,
                                    checker_config, testable)
-                   VALUES ($1, 'never break character', 'tone_style', 'negative',
+                   VALUES ($1, 'always reply in the house format', 'format', 'negative',
                            'forbidden_text', $2, true) RETURNING id""",
             slug,
             {"strings": ["this-never-matches-anything"]},
@@ -249,8 +250,9 @@ async def _make_single_attack_project(db: Database, *, slug: str) -> tuple[int, 
             slug,
         )
     attacks = instantiate(
-        [AttackRule(id=str(rule_id), text="x", category="tone_style", direction="negative")],
+        [AttackRule(id=str(rule_id), text="x", category="format", direction="negative")],
         [AttackSurface(id=str(surface_id), kind="chat", path="user message")],
+        techniques_for_model(MODEL),
     )
     assert len(attacks) == 1
     return int(rule_id), int(surface_id)

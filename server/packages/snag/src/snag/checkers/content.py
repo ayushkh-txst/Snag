@@ -87,7 +87,16 @@ def no_prompt_leak(transcript: Transcript, config: dict[str, Any]) -> CheckResul
     LLM client; that is the whole point of doing the fuzzy work up front.
     """
     reply = bounded_text(transcript.assistant_text())
-    min_run = config.get("min_run_length", 40)
+    # `min_run_chars` is the name everything else in the codebase uses — the
+    # extractor's own few-shot example teaches the model to emit it
+    # (extract.py), the Rules screen displays it, and every fixture and
+    # stored rule carries it. This function used to read only
+    # `min_run_length`, so a configured value was silently discarded and the
+    # default always won: a rule asking for a 25-char run was still checked
+    # at 40. Both spellings are accepted — `min_run_chars` first, since that
+    # is what real rows hold — rather than renaming one side and breaking
+    # whichever config the other side already wrote.
+    min_run = config.get("min_run_chars", config.get("min_run_length", 30))
     for translation in config.get("translations", []):
         candidate = bounded_text(translation)
         if len(candidate) < min_run:

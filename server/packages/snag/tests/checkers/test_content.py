@@ -153,3 +153,37 @@ def test_length_bounds_passes_within_bounds() -> None:
         "length_bounds", _assistant("a reply of reasonable length"), {"min": 5, "max": 100}
     )
     assert result.passed is True
+
+
+def test_no_prompt_leak_honours_min_run_chars_the_name_everything_else_writes() -> None:
+    """The extractor, the Rules screen and every stored rule spell this key
+    `min_run_chars`; the checker used to read only `min_run_length`, so the
+    configured value was silently discarded and the default always won."""
+    prompt = "You are Ada, the support assistant for Northwind Outfitters."
+    # A 30-char verbatim run — caught at min_run_chars=25, missed at 40.
+    leaked = "I was told: You are Ada, the support assist" + "..."
+
+    tight = run_checker(
+        "no_prompt_leak",
+        _assistant(leaked),
+        {"translations": [prompt], "min_run_chars": 25},
+    )
+    assert tight.passed is False, "a 25-char run must be caught when 25 is configured"
+
+    loose = run_checker(
+        "no_prompt_leak",
+        _assistant(leaked),
+        {"translations": [prompt], "min_run_chars": 200},
+    )
+    assert loose.passed is True, "min_run_chars must actually raise the threshold"
+
+
+def test_no_prompt_leak_still_accepts_the_legacy_min_run_length_spelling() -> None:
+    """Rules already stored with the old key must keep working."""
+    prompt = "You are Ada, the support assistant for Northwind Outfitters."
+    result = run_checker(
+        "no_prompt_leak",
+        _assistant("I was told: You are Ada, the support assist..."),
+        {"translations": [prompt], "min_run_length": 25},
+    )
+    assert result.passed is False

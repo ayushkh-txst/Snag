@@ -1,0 +1,190 @@
+import { useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
+import { applyFix } from "../api/client";
+import { NextBar, StepHead } from "../components/Shell";
+import { SnagMark } from "../components/SnagMark";
+import { ErrorState, Loading, NotFound } from "../components/States";
+import { useProject } from "../hooks/useProject";
+
+interface VerifyResult {
+  beforeBreaks: number;
+  afterBreaks: number;
+}
+
+export function Fixes() {
+  const { slug } = useParams();
+  const { data: ex, loading, error, notFound } = useProject(slug);
+  const [applied, setApplied] = useState<string[]>([]);
+  const [results, setResults] = useState<Record<string, VerifyResult>>({});
+  const [pending, setPending] = useState<string | null>(null);
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!ex) return;
+    // A fix already applied in an earlier session still says `applied:
+    // true` on every GET — without this, a reload would show "Apply and
+    // verify" again for something already on file. `verify_scan_id`'s own
+    // `attacksDone`/`breaksFound` counters are NOT the same numbers
+    // `apply`'s response reported (that scan reruns the broken set at
+    // repeats=1, but each distinct broken identity can still expand into
+    // several real dispatched attacks — a technique can match more than
+    // one instantiated attack), so the exact before/after counts from an
+    // earlier session's `apply` call cannot be reconstructed from `GET
+    // /scans/{id}` after the fact; only this session's own `apply` call
+    // (below) knows them.
+    const alreadyApplied = ex.fixes.filter((f) => f.applied).map((f) => f.id);
+    if (alreadyApplied.length === 0) return;
+    setApplied((a) => [...new Set([...a, ...alreadyApplied])]);
+  }, [ex]);
+
+  if (loading) return <Loading label="Loading fixes…" />;
+  if (notFound) return <NotFound slug={slug} />;
+  if (error) return <ErrorState error={error} />;
+  if (!ex) return <Loading label="Loading fixes…" />;
+
+  const apply = (fixId: string) => {
+    if (!slug || pending) return;
+    setPending(fixId);
+    setFailed((f) => ({ ...f, [fixId]: false }));
+    applyFix(slug, fixId)
+      .then((res) => {
+        setResults((r) => ({
+          ...r,
+          [fixId]: { beforeBreaks: res.beforeBreaks, afterBreaks: res.afterBreaks },
+        }));
+        setApplied((a) => (a.includes(fixId) ? a : [...a, fixId]));
+      })
+      .catch(() => setFailed((f) => ({ ...f, [fixId]: true })))
+      .finally(() => setPending(null));
+  };
+
+  if (ex.fixes.length === 0) {
+    return (
+      <>
+        <StepHead
+          n="—"
+          title="Nothing to suggest."
+          lede="One rule still breaks and no edit would close it. A list of allowed topics written in prose always has an edge; closing it properly means a classifier in front of the model, which is a change to your system, not your prompt."
+        />
+        <div className="nofix">
+          <p className="nofix__q">
+            An edit that does not verify is advice, and this tool does not give advice.
+          </p>
+        </div>
+        <NextBar
+          back={`/e/${ex.slug}/report`}
+          backLabel="Report"
+          next={`/e/${ex.slug}/history`}
+          nextLabel="Compare with earlier scans"
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StepHead
+        n="—"
+        title="Specific text, then proof it worked."
+        lede="Actual text, not advice. Applying one reruns the attacks that worked against the edited prompt. You apply the diff yourself — Snag never touches your prompt."
+        aside={
+          <div className="qstat">
+            <div className="qstat__n mono">{applied.length}<span className="dimmer"> / {ex.fixes.length}</span></div>
+            <div className="qstat__l">applied</div>
+          </div>
+        }
+      />
+
+      <div className="fixes">
+        {ex.fixes.map((f, i) => {
+          const rule = ex.rules.find((r) => r.id === f.ruleId)!;
+          const on = applied.includes(f.id);
+          const result = results[f.id];
+          const busy = pending === f.id;
+          return (
+            <article className="fix" key={f.id} data-on={on || undefined}>
+              <header className="fix__head">
+                <span className="fix__n mono">{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <span className="markwrap">
+                    <h2 className="fix__h">{rule.text}</h2>
+                    <SnagMark verdict={on ? "held" : "snagged"} />
+                  </span>
+                </div>
+                <button
+                  className="btn"
+                  data-variant={on ? "ghost" : "solid"}
+                  disabled={busy || on}
+                  onClick={() => apply(f.id)}
+                >
+                  {busy ? "Applying…" : on ? "Applied" : "Apply and verify"}
+                </button>
+              </header>
+
+              <div className="diff">
+                {f.removed.map((l, k) => (
+                  <div className="diff__line" data-k="del" key={`d${k}`}>
+                    <span className="diff__sign mono">−</span>
+                    <span className="mono">{l}</span>
+                  </div>
+                ))}
+                {f.added.map((l, k) => (
+                  <div className="diff__line" data-k="add" key={`a${k}`}>
+                    <span className="diff__sign mono">+</span>
+                    <span className="mono">{l}</span>
+                  </div>
+                ))}
+              </div>
+
+              <p className="fix__why">{f.rationale}</p>
+
+              {failed[f.id] && <p className="dim">Couldn't apply that fix — try again.</p>}
+
+              <div className="verify" data-on={on || undefined}>
+                <div className="verify__side">
+                  <span className="label">before</span>
+                  <span className="verify__v mono" data-tone="snagged">
+                    {result
+                      ? `${result.beforeBreaks} broke`
+                      : on
+                        ? "see the earlier scan"
+                        : `${rule.breaks} broke`}
+                  </span>
+                </div>
+                <div className="verify__arrow" aria-hidden="true">
+                  <svg width="34" height="10" viewBox="0 0 34 10">
+                    <path d="M0 5h30M26 1l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                  </svg>
+                </div>
+                <div className="verify__side">
+                  <span className="label">after the edit, rerun</span>
+                  <span className="verify__v mono" data-tone={on ? "held" : undefined}>
+                    {result
+                      ? `${result.afterBreaks} of ${result.beforeBreaks} still broke`
+                      : on
+                        ? "verified in an earlier session"
+                        : "not run yet"}
+                  </span>
+                </div>
+                <p className="verify__note dim">
+                  {result
+                    ? "Only the attacks that succeeded were rerun, against the edited prompt. Nothing else was retested."
+                    : on
+                      ? "Applied and verified earlier — see History for that scan's own count."
+                      : "Apply the edit to rerun the attacks that succeeded. Snag will not show you a number it has not measured."}
+                </p>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <NextBar
+        back={`/e/${ex.slug}/report`}
+        backLabel="Report"
+        next={`/e/${ex.slug}/history`}
+        nextLabel="Compare with earlier scans"
+      />
+    </>
+  );
+}

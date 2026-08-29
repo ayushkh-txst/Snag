@@ -1,0 +1,133 @@
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: var(--ui);
+  font-size: var(--t-base);
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-synthesis-weight: none;
+}
+
+#root { min-height: 100vh; }
+
+h1, h2, h3, h4 {
+  font-family: var(--display);
+  font-weight: 600;
+  line-height: 1.06;
+  letter-spacing: -0.022em;
+  font-variation-settings: "wdth" 92;
+}
+
+a { color: inherit; text-decoration: none; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+svg { display: block; }
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 1px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+::selection { background: var(--ink); color: var(--paper); }
+
+/* ── shared primitives ─────────────────────────────────────────────── */
+
+.mono { font-family: var(--mono); font-size: var(--t-sm); letter-spacing: -0.01em; }
+
+.label {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.eyebrow::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.dim { color: var(--ink-2); }
+.dimmer { color: var(--ink-3); }
+
+.hr { height: 1px; background: var(--rule); border: 0; }
+
+.shell {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 var(--s6);
+}
+@media (max-width: 720px) { .shell { padding: 0 var(--s4); } }
+
+/* scrollbars — thin, inky */
+* { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 9px; border: 3px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── the snag mark ─────────────────────────────────────────────────── */
+
+.snagmark {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  height: 14px;
+  margin-top: -2px;
+  pointer-events: none;
+}
+.snagmark__run {
+  flex: 1 1 auto;
+  min-width: 0;
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 620ms var(--ease-out);
+  transition-delay: 0ms;
+}
+.snagmark__cap {
+  flex: 0 0 26px;
+  opacity: 0;
+  transition: opacity 200ms linear 380ms;
+}
+.snagmark__cap path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition: stroke-dashoffset 560ms var(--ease) 400ms;
+}
+.snagmark[data-drawn] .snagmark__run { transform: scaleX(1); }
+.snagmark[data-drawn] .snagmark__cap { opacity: 1; }
+.snagmark[data-drawn] .snagmark__cap path { stroke-dashoffset: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .snagmark__run { transform: scaleX(1); }
+  .snagmark__cap, .snagmark__cap path { opacity: 1; stroke-dashoffset: 0; }
+}

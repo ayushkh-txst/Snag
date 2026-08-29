@@ -36,3 +36,35 @@ __pycache__/
 # secrets and local config
 .env
 server/.env
+
+# agent instructions, plans and working notes — never tracked
+AGENTS.md
+AGENT.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+QWEN.md
+CONVENTIONS.md
+.claude/
+.claude*/
+.codex/
+.cursor/
+.cursorrules
+.cursorignore
+.aider*
+.continue/
+.windsurf/
+.windsurfrules
+.gemini/
+.qwen/
+.roo/
+.cline*/
+.specstory/
+.github/copilot-instructions.md
+.mcp.json
+
+# planning artefacts and scratch
+.planning/
+.gsd/
+notes/
+scratch/

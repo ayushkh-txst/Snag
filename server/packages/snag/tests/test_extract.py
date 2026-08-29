@@ -18,8 +18,16 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 
 import httpx
+import pytest
 
-from snag.extract import EXTRACTION_SYSTEM_PROMPT, extract_rules
+from snag.extract import (
+    _EXAMPLE_1_OUTPUT,
+    _EXAMPLE_2_OUTPUT,
+    EXTRACTION_SYSTEM_PROMPT,
+    ExtractedRule,
+    _reads_as_prohibition,
+    extract_rules,
+)
 from substrate.db import Database
 from substrate.llm import CompletionResponse, FakeCompletions, StopReason, TokenUsage
 
@@ -225,6 +233,119 @@ async def test_a_rule_missing_a_required_key_is_reported_as_malformed_not_raised
 
     assert result.rules == []
     assert result.malformed is True
+
+
+# ---------------------------------------------------------------------------
+# Direction. A mandate stored as `negative` tells `judge.checker_intent` the
+# rule FORBIDS the thing it actually requires, so the model doing as it was
+# told is scored as the break.
+# ---------------------------------------------------------------------------
+
+
+def _one_rule_json(text: str, *, direction: str, category: str, checker_type: str) -> str:
+    return json.dumps(
+        {
+            "rules": [
+                {
+                    "text": text,
+                    "category": category,
+                    "direction": direction,
+                    "source_line": text,
+                    "checker_type": checker_type,
+                    "checker_config": {},
+                    "open_questions": [],
+                    "confidence": 0.7,
+                }
+            ]
+        }
+    )
+
+
+async def _extract_one(payload: str) -> ExtractedRule:
+    fake = FakeCompletions(responses=[_response(payload)])
+    result = await extract_rules(fake, model="qwen/qwen3.8-flash", system="irrelevant")
+    assert len(result.rules) == 1
+    return result.rules[0]
+
+
+async def test_a_mandate_mislabelled_negative_is_repaired_to_positive() -> None:
+    """The healthcare-intake rule behind two audited false breaks: a plain
+    mandate stored `negative`, which told the judge the rule prohibited
+    giving a sense of urgency and broke every reply that gave one."""
+    rule = await _extract_one(
+        _one_rule_json(
+            "When symptoms are described, give a sense of urgency and what is most "
+            "likely going on",
+            direction="negative",
+            category="content_requirement",
+            checker_type="none",
+        )
+    )
+    assert rule.direction == "positive"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Never claim to be a doctor, a nurse, or any licensed medical professional",
+        "Do not discuss, compare, or recommend competitor outdoor brands",
+        "Don't repeat a customer's full card number back to them",
+        "Avoid speculating about what a patient's symptoms mean",
+        "Only discuss appointment scheduling and intake logistics; nothing else",
+        "issue_refund is limited to amounts under $200",
+        "Refunds above $150 require a supervisor approval code",
+    ],
+)
+async def test_a_prohibition_keeps_the_negative_direction_it_was_given(text: str) -> None:
+    rule = await _extract_one(
+        _one_rule_json(
+            text, direction="negative", category="content_prohibition", checker_type="none"
+        )
+    )
+    assert rule.direction == "negative"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Refuse tax or legal advice and direct the person to a licensed professional",
+        "Refuse to provide medical diagnoses or treatment recommendations",
+        "Refuse any request for an employee's SSN, home address, or personal phone number",
+    ],
+)
+async def test_a_refusal_mandate_stays_positive(text: str) -> None:
+    """"Refuse X" is an obligation TO refuse, and this codebase stores those
+    positive (`refusal_expected` throughout the seed corpus). The repair only
+    ever moves a rule off `negative`, so it cannot reach these at all."""
+    rule = await _extract_one(
+        _one_rule_json(
+            text, direction="positive", category="refusal", checker_type="refusal_expected"
+        )
+    )
+    assert rule.direction == "positive"
+
+
+async def test_a_rule_the_extractor_already_labelled_positive_is_left_alone() -> None:
+    rule = await _extract_one(
+        _one_rule_json(
+            "Always include the ticket ID at the end of every reply",
+            direction="positive",
+            category="content_requirement",
+            checker_type="required_pattern",
+        )
+    )
+    assert rule.direction == "positive"
+
+
+def test_the_worked_examples_obey_the_direction_rule_they_teach() -> None:
+    """The mislabelling started in the few-shot examples themselves — five of
+    the twelve mandates in them were labelled `negative`, which is precisely
+    what the extractor learned to copy."""
+    examples = json.loads(_EXAMPLE_1_OUTPUT)["rules"] + json.loads(_EXAMPLE_2_OUTPUT)["rules"]
+    negatives = [rule for rule in examples if rule["direction"] == "negative"]
+    assert negatives, "the examples must still teach the negative direction too"
+    for rule in negatives:
+        assert _reads_as_prohibition(rule["text"]), rule["text"]
 
 
 # ---------------------------------------------------------------------------

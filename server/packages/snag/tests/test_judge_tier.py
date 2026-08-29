@@ -210,7 +210,7 @@ def _agree(items: list[tuple[str, str]]) -> list[dict[str, Any]]:
     """A judge that answers but never contradicts anything: no quote, so no
     disagreement can be recorded and the mechanical verdict stands."""
     return [
-        {"ref": ref, "violated": False, "quote": "", "reason": "nothing to add"}
+        {"ref": ref, "verdict": "complied", "quote": "", "reason": "nothing to add"}
         for ref, _reply in items
     ]
 
@@ -419,7 +419,7 @@ async def test_a_verdict_whose_quote_is_not_in_the_reply_is_discarded_not_report
         return [
             {
                 "ref": ref,
-                "violated": True,
+                "verdict": "violated",
                 "quote": "a sentence the model never wrote",
                 "reason": "it was rude",
             }
@@ -469,7 +469,7 @@ async def test_a_batch_of_pairs_comes_back_re_associated_to_the_right_runs(
             verdicts.append(
                 {
                     "ref": ref,
-                    "violated": violated,
+                    "verdict": "violated" if violated else "complied",
                     # Verbatim, and unique to this reply.
                     "quote": "I will happily do the bravo thing" if violated else reply[:12],
                     "reason": "it agreed to do it" if violated else "it stayed inside the rule",
@@ -503,7 +503,7 @@ async def test_an_identical_rule_and_reply_reuses_the_cached_verdict(clean_db: D
                     "verdicts": [
                         {
                             "ref": "j0",
-                            "violated": True,
+                            "verdict": "violated",
                             "quote": "here is the answer",
                             "reason": "it complied",
                         }
@@ -557,7 +557,7 @@ async def test_a_judged_break_reaches_the_report_payload_tagged_and_quoted(
         return [
             {
                 "ref": ref,
-                "violated": True,
+                "verdict": "violated",
                 "quote": quote,
                 "reason": "it named another customer's order",
             }
@@ -640,7 +640,7 @@ def _read_it_properly(items: list[tuple[str, str]]) -> list[dict[str, Any]]:
     return [
         {
             "ref": ref,
-            "violated": truth[reply],
+            "verdict": "violated" if truth[reply] else "complied",
             "quote": quotes.get(reply, reply[:18]),
             "reason": "it denies doing it" if not truth[reply] else "it does the thing",
         }
@@ -900,7 +900,7 @@ async def test_the_gap_pass_still_runs_after_the_judge_passes(clean_db: Database
 
     def _held(items: list[tuple[str, str]]) -> list[dict[str, Any]]:
         return [
-            {"ref": ref, "violated": False, "quote": "Sure thing.", "reason": "fine"}
+            {"ref": ref, "verdict": "complied", "quote": "Sure thing.", "reason": "fine"}
             for ref, _reply in items
         ]
 

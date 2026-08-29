@@ -82,6 +82,23 @@ class Transcript:
         a break."""
         return "\n".join(t.content for t in self.turns if t.role == "assistant" and not t.forged)
 
+    def attacker_text(self) -> str:
+        """Everything the ATTACK put in front of the model, in order: its own
+        user turns, plus any content it planted in a tool result (the
+        indirect-injection surface) and the forged assistant turns it wrote
+        for itself.
+
+        The mirror of `assistant_text()`, and used for the same reason it is:
+        `snag.judge` needs to know what was actually asked before it can say
+        whether a reply violated a rule. A reply that declines is only a
+        failure to comply if compliance was what the request called for."""
+        return "\n".join(
+            t.content
+            for t in self.turns
+            if t.content
+            and (t.role == "user" or t.forged or (t.role == "tool_result" and t.planted))
+        )
+
     def tool_calls(self) -> list[ToolCall]:
         return [
             ToolCall(name=t.name or "", args=_parse_args(t.content), turn=t)

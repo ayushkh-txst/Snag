@@ -58,6 +58,8 @@ ignore = [
 # quotation marks ARE the fixture — a real refusal writes "I can’t", and
 # normalizing them here would quietly stop testing the thing that broke.
 "packages/snag/tests/checkers/audit_corpus.py" = ["RUF001"]
+"packages/snag/tests/test_judge_unexercised.py" = ["RUF001"]
+"packages/snag/tests/test_judge_live_corpus.py" = ["RUF001"]
 "alembic/**" = ["ANN", "E501", "I"]
 
 # ---------------------------------------------------------------- mypy
@@ -84,7 +86,8 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["packages/substrate/tests", "packages/snag/tests"]
-addopts = "-q --strict-markers --import-mode=importlib"
+addopts = "-q --strict-markers --import-mode=importlib -m 'not live'"
 markers = [
     "integration: needs a live Postgres (run local Postgres first)",
+    "live: dispatches a real model call (needs OPENROUTER_API_KEY); deselected by default",
 ]

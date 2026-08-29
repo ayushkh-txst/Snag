@@ -77,6 +77,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUE_BY_ID, Technique, techniques_for_model
 from snag.checkers import CheckResult, run_checker
+from snag.checkers.content import literal_secret_strings
 from snag.checkers.refusal import DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
 from snag.config import get_settings
@@ -1397,6 +1398,7 @@ async def _process_unit(
                 ref=f"j{len(pending_judged)}",
                 rule_text=rule["text"],
                 intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
+                prompt=transcript.attacker_text(),
                 reply=reply,
             ),
         )
@@ -1529,6 +1531,7 @@ async def _process_unit(
                     ref=f"x{len(pending_checks)}",
                     rule_text=rule["text"],
                     intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
+                    prompt=transcript.attacker_text(),
                     reply=reply_text,
                 ),
             )
@@ -1730,10 +1733,14 @@ async def _run_scan(
 
     surface_categories = frozenset(scan["surfaces"] or [])
     surface_kinds = _executed_surface_kinds(surface_categories)
+    # `secrets=` is what keeps a rule's own protected value out of the attack
+    # that hunts it: the rule text quotes the code the prompt states, and an
+    # attacker that says it first turns the model's refusal into a leak.
     attack_rules = [
         AttackRule(
             id=str(r["id"]), text=r["text"], category=r["category"],
             direction=r["direction"], testable=r["testable"],
+            secrets=tuple(literal_secret_strings(r["checker_config"] or {})),
         )
         for r in rule_rows
     ]
@@ -1776,6 +1783,7 @@ async def _run_scan(
                 AttackRule(
                     id=str(r["id"]), text=r["text"], category=r["category"],
                     direction=r["direction"], testable=True,
+                    secrets=tuple(literal_secret_strings(r["checker_config"] or {})),
                 )
                 for r in judged_rule_rows
             ],

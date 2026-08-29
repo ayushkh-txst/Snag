@@ -130,6 +130,44 @@ async def test_retries_on_429_then_succeeds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_429_notifies_retry_listeners_before_backing_off() -> None:
+    """`RetryListening`: a registered listener fires the moment a 429 is seen
+    (once per 429), so a caller's concurrency governor can ease off before the
+    adapter's own retries turn the throttle into a storm. A non-429 retryable
+    status (503 here) does not fire it — the signal is specifically rate limiting."""
+    attempts = {"n": 0}
+    fired = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "down"}})
+        if attempts["n"] == 2:
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(200, json=_chat_completion(content="ok"))
+
+    adapter = _adapter(handler, max_attempts=4)
+    adapter.add_retry_listener(lambda: fired.__setitem__("n", fired["n"] + 1))
+    response = await adapter.complete(_request())
+    assert response.text == "ok"
+    assert fired["n"] == 1  # the one 429, not the 503
+
+
+@pytest.mark.asyncio
+async def test_add_retry_listener_cancel_stops_further_notifications() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+    fired = {"n": 0}
+    adapter = _adapter(handler, max_attempts=2)
+    cancel = adapter.add_retry_listener(lambda: fired.__setitem__("n", fired["n"] + 1))
+    cancel()
+    with pytest.raises(CompletionError):
+        await adapter.complete(_request())
+    assert fired["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_exhausted_retries_raise_completion_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": {"message": "down"}})

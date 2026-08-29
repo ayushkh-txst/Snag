@@ -7,10 +7,11 @@ Nothing above this module may import a vendor SDK.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
     "CompletionError",
@@ -19,6 +20,7 @@ __all__ = [
     "Completions",
     "FakeCompletions",
     "Message",
+    "RetryListening",
     "Role",
     "StopReason",
     "TokenUsage",
@@ -204,6 +206,23 @@ class ToolsNotSupportedError(CompletionError):
 
 class Completions(Protocol):
     async def complete(self, request: CompletionRequest) -> CompletionResponse: ...
+
+
+@runtime_checkable
+class RetryListening(Protocol):
+    """An OPTIONAL capability some adapters offer on top of `Completions`: the
+    ability to be told, out of band, that a call just hit a retryable rate
+    limit (HTTP 429). The port itself only promises `complete`; a caller that
+    wants to react to throttling (`snag.runner`'s adaptive concurrency limiter)
+    probes for this with `isinstance(x, RetryListening)` and degrades to a
+    fixed bound when it isn't there — which is exactly what `FakeCompletions`
+    and any minimal adapter do.
+
+    The listener is invoked synchronously from inside `complete` when a 429 is
+    seen (before the adapter's own backoff), so it must not block or await.
+    Registration returns a zero-argument cancel callback."""
+
+    def add_retry_listener(self, listener: Callable[[], None]) -> Callable[[], None]: ...
 
 
 @dataclass

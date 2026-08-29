@@ -12,7 +12,7 @@ from functools import lru_cache
 from typing import Annotated, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     T-01-02. Per-request BYOK (`X-OpenRouter-Key`) is the seam plan 01-02
     adds in `snag.api.deps.get_completions`; this plan wires the owner-key
     path only."""
+
+    scan_concurrency: int = Field(default=6, ge=1)
+    """The CEILING on how many attack dispatches a single scan runs at once
+    (`snag.runner`). A scan is hundreds of model calls, each 7-13s against a
+    reasoning model; awaited one at a time that is ~90 minutes, so they run
+    concurrently instead, bounded here.
+
+    Modest on purpose: OpenRouter rate-limits, and the adapter's own retry
+    turns excess concurrency into a 429 storm rather than throughput. This
+    ceiling is not read from the provider because there is no number to read
+    — OpenRouter's `/api/v1/key` reports `rate_limit.requests = -1`
+    (deprecated) and live completions carry no `X-RateLimit`/`Retry-After`
+    headers, so the real limit is unpublished, dynamic, and per-provider. The
+    runner starts below this ceiling and adapts upward toward it on clean
+    calls / downward on 429s (`runner._AdaptiveLimiter`); this value is only
+    the hard upper bound that adaptation can never exceed."""
 
     ephemeral_grace_seconds: int = 1800
     """PRIV-02: the window between an ephemeral project's completed-scan

@@ -57,11 +57,14 @@ site (T-13-01).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import re
-from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import partial
 from typing import Any, cast
 
 import httpx
@@ -78,7 +81,7 @@ from snag.checkers.refusal import DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
 from snag.config import get_settings
 from snag.cost import estimate_scan_cost
-from snag.gaps import GAP_CHECKLIST, persist_gap, probe_gap
+from snag.gaps import GAP_CHECKLIST, GapChecklistItem, GapResult, persist_gap, probe_gap
 from snag.judge import (
     JUDGE_BATCH_SIZE,
     DispatchFn,
@@ -96,6 +99,7 @@ from substrate.llm import (
     CompletionResponse,
     Completions,
     Message,
+    RetryListening,
     Role,
     StopReason,
     ToolCall,
@@ -274,7 +278,17 @@ class _RunState:
     tracked from each dispatch's OWN reported `cost_usd` — not a shared
     `CostLedger` — so the same code path works whether `completions` is a
     real, ledger-backed adapter or a `FakeCompletions` test double that
-    never touches one."""
+    never touches one.
+
+    Concurrency (01-19): several attack units dispatch at once, so the budget
+    guard can no longer be a bare read-modify-write. `budget_lock` makes
+    "check both caps, then reserve this call" one atomic step, so two units
+    can never both pass the check and then both exceed the cap.
+    `calls_in_flight`/`spend_reserved` are those reservations — projected
+    cost held against the caps for calls that have been admitted but have not
+    yet reported their real cost. The lock is held only across the
+    check-and-reserve and the later reconcile, NEVER across the model call
+    itself."""
 
     model: str
     run_id: str
@@ -284,6 +298,10 @@ class _RunState:
     call_count: int = 0
     spend_total: Decimal = Decimal("0")
     attacks_done: int = 0
+    calls_in_flight: int = 0
+    spend_reserved: Decimal = Decimal("0")
+    budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    limiter: _AdaptiveLimiter | None = None
     tool_support_note_recorded: bool = False
     """Set the first time this scan hits `ToolsNotSupportedError` — a flag,
     not a counter, so `scans.tool_support_note` (SIM-02) is written once per
@@ -296,14 +314,44 @@ async def _dispatch(
     """The ONE place this module dispatches to the model — every setup call
     and every attack-turn call goes through here, so the budget guard
     trivially precedes every dispatch (SCAN-03; there is exactly one real
-    call site in this whole module)."""
-    if state.call_cap is not None and state.call_count + 1 > state.call_cap:
-        raise BudgetExceeded("call cap reached")
-    if state.spend_cap is not None and state.spend_total + state.per_call_cost > state.spend_cap:
-        raise BudgetExceeded("spend cap reached")
-    response = await completions.complete(request)
-    state.call_count += 1
-    state.spend_total += response.cost_usd
+    call site in this whole module).
+
+    Under concurrency the guard RESERVES before it dispatches: the cap check
+    and the reservation happen together under `budget_lock`, counting both
+    what has already been spent AND what in-flight calls have reserved, so
+    the total admitted can never exceed either cap even with many units
+    racing. The reservation is reconciled to the call's real cost on the way
+    out (and released if the call fails, so a retry-exhausted failure doesn't
+    permanently consume cap the way a real, billed call does — same as the
+    pre-concurrency behaviour, where `call_count` only ever counted
+    successes). The lock is not held across the model call."""
+    async with state.budget_lock:
+        if (
+            state.call_cap is not None
+            and state.call_count + state.calls_in_flight + 1 > state.call_cap
+        ):
+            raise BudgetExceeded("call cap reached")
+        if (
+            state.spend_cap is not None
+            and state.spend_total + state.spend_reserved + state.per_call_cost > state.spend_cap
+        ):
+            raise BudgetExceeded("spend cap reached")
+        state.calls_in_flight += 1
+        state.spend_reserved += state.per_call_cost
+    try:
+        response = await completions.complete(request)
+    except BaseException:
+        async with state.budget_lock:
+            state.calls_in_flight -= 1
+            state.spend_reserved -= state.per_call_cost
+        raise
+    async with state.budget_lock:
+        state.calls_in_flight -= 1
+        state.spend_reserved -= state.per_call_cost
+        state.call_count += 1
+        state.spend_total += response.cost_usd
+    if state.limiter is not None:
+        state.limiter.record_success()
     return response
 
 
@@ -318,6 +366,116 @@ async def _projected_per_call_cost(
         transport=transport,
     )
     return cost
+
+
+# ------------------------------------------------------------ concurrency
+
+# A scan starts BELOW its configured ceiling and feels its way up: the real
+# per-provider rate limit is unpublished and dynamic (see
+# `config.Settings.scan_concurrency`), so a static number is only ever a
+# guess. Starting low and climbing on clean calls avoids opening a scan with
+# a burst that trips a 429 immediately.
+_ADAPTIVE_START = 3
+# How long to stop admitting NEW calls after a 429, letting the in-flight set
+# drain and the provider's window recover before probing again. Short: the
+# adapter is already backing off the individual failed call; this only keeps
+# the scan from piling more on top while it does.
+_ADAPTIVE_PAUSE_SECONDS = 1.0
+
+
+class _AdaptiveLimiter:
+    """AIMD concurrency governor for one scan's attack dispatch. Bounds how
+    many units run at once to `allowed`, which lives in `[1, ceiling]` and
+    self-tunes: +1 per clean call (additive increase, capped at the ceiling),
+    halved on a 429 (multiplicative decrease), with a brief pause on new
+    launches after a 429 so the in-flight set can drain.
+
+    It only ever makes the scan LESS concurrent than the ceiling, never more,
+    and it is entirely separate from the budget guard in `_dispatch` — the
+    caps are still checked and reserved before every single call regardless of
+    what this admits. So adaptation cannot cause a cap to be exceeded; the
+    worst it can do is run slower.
+
+    No `asyncio.Lock`: every method below is synchronous through its critical
+    section (the only `await` is waiting for a wakeup), and asyncio runs those
+    sections without interleaving, so the counters can't tear. `record_*` are
+    safe to call from inside an adapter's synchronous 429 callback."""
+
+    def __init__(self, *, ceiling: int, start: int = _ADAPTIVE_START) -> None:
+        self._ceiling = max(1, ceiling)
+        self._allowed = max(1, min(start, self._ceiling))
+        self._in_flight = 0
+        self._pause_until = 0.0
+        self._wakeup = asyncio.Event()
+        self._wakeup.set()
+
+    @property
+    def allowed(self) -> int:
+        return self._allowed
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            now = loop.time()
+            if now >= self._pause_until and self._in_flight < self._allowed:
+                self._in_flight += 1
+                return
+            # Clear then RE-CHECK before waiting: a wakeup that fired between
+            # the checks above and here would otherwise be lost. Both the
+            # check and the clear are synchronous, so nothing runs between
+            # them to make this racy.
+            self._wakeup.clear()
+            now = loop.time()
+            if now >= self._pause_until and self._in_flight < self._allowed:
+                self._in_flight += 1
+                return
+            timeout = self._pause_until - now if now < self._pause_until else None
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wakeup.wait(), timeout)
+
+    def release(self) -> None:
+        self._in_flight -= 1
+        self._wakeup.set()
+
+    def record_success(self) -> None:
+        if self._allowed < self._ceiling:
+            self._allowed += 1
+            self._wakeup.set()
+
+    def record_rate_limited(self) -> None:
+        self._allowed = max(1, self._allowed // 2)
+        self._pause_until = asyncio.get_running_loop().time() + _ADAPTIVE_PAUSE_SECONDS
+
+
+async def _as_completed_bounded[T](
+    factories: Sequence[Callable[[], Awaitable[T]]],
+    *,
+    limiter: _AdaptiveLimiter,
+) -> AsyncIterator[T]:
+    """Run every `factories[i]()` with at most `limiter.allowed` in flight at
+    a time, yielding each result the moment it is ready (completion order, not
+    submission order). Each factory is expected to catch its own failures and
+    return a result object rather than raise — the runner needs a `BudgetExceeded`
+    on one unit to be observed and drained, not to abort the whole gather and
+    strand the units that already dispatched cleanly."""
+    if not factories:
+        return
+
+    async def _guarded(factory: Callable[[], Awaitable[T]]) -> T:
+        await limiter.acquire()
+        try:
+            return await factory()
+        finally:
+            limiter.release()
+
+    tasks = [asyncio.create_task(_guarded(f)) for f in factories]
+    try:
+        for completed in asyncio.as_completed(tasks):
+            yield await completed
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 # -------------------------------------------------------------------- setup
@@ -665,6 +823,179 @@ async def _execute_indirect_attack(
     return Transcript(turns=transcript_turns), second
 
 
+# ----------------------------------------------------------- units of work
+
+
+@dataclass(slots=True)
+class _AttackUnit:
+    """One (attack, repeat) pair plus everything precomputed for it, so the
+    concurrent dispatch step is a pure function of the unit and needs nothing
+    from the enclosing loop. Built in the same deterministic order as before
+    (tiered attacks x repeats); concurrency changes only when each unit's
+    reply comes back, never which units exist."""
+
+    attack: Attack
+    tier: str
+    rule: Any
+    surface: Any
+    repeat_index: int
+    checker_config: dict[str, Any]
+    tools_for_attack: tuple[dict[str, Any], ...] | None
+    turns_override: tuple[str, ...] | None
+    prefill: str | None
+    indirect_technique: Technique | None
+    indirect_tool_name: str
+    indirect_tool_schema: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _UnitOutcome:
+    """What a unit's dispatch produced, so the sequential processing step can
+    handle it without re-deriving anything. `kind` is one of "ok", "budget"
+    (this unit hit a cap mid-dispatch and was abandoned unpersisted, exactly
+    as a sequential run abandons a partial multi-turn attack), "tools" (the
+    model rejected `tools`), or "error" (a transient provider failure on this
+    one attack)."""
+
+    unit: _AttackUnit
+    kind: str
+    transcript: Transcript | None = None
+    final_response: Any = None
+    error: str | None = None
+
+
+async def _dispatch_attack_unit(
+    unit: _AttackUnit,
+    *,
+    completions: Completions,
+    system_prompt: str,
+    tool_schemas: dict[str, dict[str, Any]],
+    state: _RunState,
+) -> _UnitOutcome:
+    """Run ONE unit's model calls — in order, since a multi-turn ladder rung
+    depends on the previous reply. Concurrency is ACROSS units (this coroutine
+    is what `_as_completed_bounded` runs many of at once), never within one.
+    Every failure is caught and turned into a `_UnitOutcome`; this never
+    raises, so one unit's cap-stop or provider error can't abort the gather
+    and lose the units that already succeeded."""
+    try:
+        if unit.indirect_technique is not None:
+            transcript, final_response = await _execute_indirect_attack(
+                unit.attack,
+                completions=completions,
+                technique=unit.indirect_technique,
+                tool_name=unit.indirect_tool_name,
+                tool_schema=unit.indirect_tool_schema,
+                variant=_indirect_variant_for_repeat(unit.repeat_index),
+                system_prompt=system_prompt,
+                state=state,
+            )
+        else:
+            transcript, final_response = await _execute_attack(
+                unit.attack,
+                completions=completions,
+                tools=unit.tools_for_attack,
+                system_prompt=system_prompt,
+                state=state,
+                turns_override=unit.turns_override,
+                tool_schemas=tool_schemas,
+                prefill=unit.prefill,
+            )
+    except BudgetExceeded:
+        return _UnitOutcome(unit, "budget")
+    except ToolsNotSupportedError:
+        return _UnitOutcome(unit, "tools")
+    except CompletionError as exc:
+        return _UnitOutcome(unit, "error", error=repr(exc))
+    return _UnitOutcome(unit, "ok", transcript=transcript, final_response=final_response)
+
+
+def _build_units(
+    tiered_attacks: Sequence[tuple[Attack, str]],
+    *,
+    rule_by_id: dict[str, Any],
+    surface_by_id: dict[str, Any],
+    setup: _ScanSetup,
+    tools: tuple[dict[str, Any], ...] | None,
+    tool_schemas: dict[str, dict[str, Any]],
+    surface_categories: frozenset[str],
+    repeats: int,
+) -> list[_AttackUnit]:
+    """Expand the tiered attack list into one `_AttackUnit` per (attack,
+    repeat), precomputing everything the dispatch step needs. Pure and
+    order-preserving: this is the same nesting the sequential loop walked, just
+    materialised so the units can be scheduled concurrently."""
+    units: list[_AttackUnit] = []
+    for attack, tier in tiered_attacks:
+        rule = rule_by_id[attack.rule_id]
+        surface = surface_by_id[attack.surface_id]
+        checker_config = (
+            _effective_checker_config(rule, attack, setup) if tier == MECHANICAL_TIER else {}
+        )
+        tools_for_attack = tools if attack.surface_kind == TOOL_ABUSE_KIND else None
+
+        # MULTI-TURN pads every chat attack to depth >= 3 with the generic
+        # escalation lead-ins when the category is selected; plain "direct"
+        # (no "multiturn") leaves a technique's own turns untouched — see the
+        # module docstring for why this is a mode switch, not a second pass.
+        # A technique that scripts its own escalation (`escalation_ladder`'s
+        # four rungs) is already past the minimum depth, so it runs its own
+        # script either way and never picks up runner-invented filler.
+        turns_override: tuple[str, ...] | None = None
+        if attack.surface_kind == DIRECT_KIND and "multiturn" in surface_categories:
+            base_turns = (
+                attack.prompt_or_turns
+                if isinstance(attack.prompt_or_turns, tuple)
+                else (attack.prompt_or_turns,)
+            )
+            turns_override = _pad_to_multiturn_depth(base_turns)
+
+        technique = TECHNIQUE_BY_ID[attack.technique_id]
+        indirect_technique = technique if attack.surface_kind == INDIRECT_KIND else None
+        # §S1: only the direct/tool paths can forge a turn. The INDIRECT path
+        # builds its own fixed exchange (`_execute_indirect_attack`) and no
+        # technique in the `prefill` family reaches `tool_return`, so there is
+        # nothing to thread through there.
+        prefill = technique.prefill
+        indirect_tool_name = (
+            _tool_name_from_surface_path(surface["path"])
+            if attack.surface_kind == INDIRECT_KIND
+            else ""
+        )
+        indirect_tool_schema = tool_schemas.get(indirect_tool_name, {})
+
+        for repeat_index in range(repeats):
+            units.append(
+                _AttackUnit(
+                    attack=attack,
+                    tier=tier,
+                    rule=rule,
+                    surface=surface,
+                    repeat_index=repeat_index,
+                    checker_config=checker_config,
+                    tools_for_attack=tools_for_attack,
+                    turns_override=turns_override,
+                    prefill=prefill,
+                    indirect_technique=indirect_technique,
+                    indirect_tool_name=indirect_tool_name,
+                    indirect_tool_schema=indirect_tool_schema,
+                )
+            )
+    return units
+
+
+@dataclass(slots=True)
+class _GapOutcome:
+    """The gap-probe counterpart to `_UnitOutcome`: a probe caught its own
+    failures so the concurrent gather never aborts on one bad probe. `kind` is
+    "ok" | "budget" | "tools" | "error"."""
+
+    item: GapChecklistItem
+    kind: str
+    result: GapResult | None = None
+    error: str | None = None
+
+
 # --------------------------------------------------------------- persistence
 
 
@@ -1010,6 +1341,210 @@ async def _flush_cross_checks(
     pending.clear()
 
 
+async def _process_unit(
+    outcome: _UnitOutcome,
+    *,
+    db: Database,
+    scan_id: int,
+    completions: Completions,
+    state: _RunState,
+    model: str,
+    judge_model: str | None,
+    pending_judged: list[_PendingJudged],
+    pending_checks: list[_PendingCrossCheck],
+    dispatch: DispatchFn,
+    budget_hit: bool,
+) -> bool:
+    """Score, persist, and queue the follow-up judging for ONE dispatched
+    ("ok") unit — the sequential half of the concurrent pipeline. This runs in
+    the single consumer coroutine, one unit at a time, so `pending_judged`/
+    `pending_checks` and the judge-batch flushes stay exactly as ordered and
+    single-threaded as before; concurrency touched only how the reply arrived.
+
+    Returns the (possibly newly set) `budget_hit`. A flush that trips a cap
+    sets it and stops further flushing rather than raising: units already
+    dispatched cleanly still get persisted, and the caller marks the scan
+    stopped once the whole in-flight set has drained — the honest count is
+    "everything that actually ran", not "everything up to the first cap
+    error"."""
+    unit = outcome.unit
+    attack = unit.attack
+    rule = unit.rule
+    surface = unit.surface
+    checker_config = unit.checker_config
+    repeat_index = unit.repeat_index
+    assert outcome.transcript is not None  # guaranteed for kind == "ok"
+    transcript = outcome.transcript
+    final_response = outcome.final_response
+
+    # 01-18: never let a verdict computed over a reply that never arrived
+    # (empty, or truncated at max_tokens) be recorded as "the rule held
+    # against this attack".
+    unusable_reason = _unusable_reply_reason(final_response)
+
+    if unit.tier == JUDGED_TIER:
+        assert judge_model is not None  # no judge, no judged attacks
+        reply = transcript.assistant_text()
+        judged_item = _PendingJudged(
+            attack=attack,
+            rule=rule,
+            surface=surface,
+            repeat_index=repeat_index,
+            transcript=transcript,
+            pair=JudgePair(
+                # Unique within the batch this item will ride in — the whole
+                # re-association contract (see `snag.judge.JudgePair`).
+                ref=f"j{len(pending_judged)}",
+                rule_text=rule["text"],
+                intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
+                reply=reply,
+            ),
+        )
+        if unusable_reason is not None or not reply.strip():
+            # Nothing to quote means nothing to judge, and spending a judge
+            # call to be told so would be waste. Recorded as the not-applicable
+            # third state, exactly as the mechanical tier records an unscorable
+            # reply.
+            await _persist_unjudged(
+                db,
+                scan_id,
+                item=judged_item,
+                state=state,
+                reason=unusable_reason or "the model returned an empty reply",
+            )
+            return budget_hit
+        pending_judged.append(judged_item)
+        if len(pending_judged) >= JUDGE_BATCH_SIZE and not budget_hit:
+            try:
+                await _flush_judged(
+                    db, scan_id,
+                    completions=completions, judge_model=judge_model, state=state,
+                    pending=pending_judged, dispatch=dispatch,
+                )
+            except BudgetExceeded:
+                budget_hit = True
+        return budget_hit
+
+    try:
+        result = run_checker(rule["checker_type"], transcript, checker_config)
+    except (KeyError, TypeError, ValueError, re.error) as exc:
+        # A rule's checker_config can be malformed or missing a key its own
+        # checker_type requires — extraction (LLM-first, no provider-enforced
+        # json_schema) or a hand-typed rule can both produce a checker_type/
+        # checker_config pairing that doesn't line up (e.g. `tool_call_order`
+        # needs `tool_a`/`tool_b`; a config missing either used to KeyError the
+        # entire scan). Same isolation discipline as the CompletionError branch:
+        # one attack's config problem must not lose every other already-
+        # completed and yet-to-run attack in the scan.
+        log.warning(
+            "scan.checker_config_mismatch",
+            scan_id=scan_id,
+            attack=attack.key(),
+            checker_type=rule["checker_type"],
+            error=repr(exc),
+        )
+        return budget_hit
+
+    result = _scored_result(result, unusable_reason)
+    if not result.applicable:
+        log.warning(
+            "scan.reply_not_scorable",
+            scan_id=scan_id,
+            attack=attack.key(),
+            reason=unusable_reason or result.output,
+        )
+    broke = not result.passed
+
+    async with db.acquire() as conn:
+        run_id = await _persist_attack_run(
+            conn,
+            scan_id=scan_id,
+            rule=rule,
+            surface=surface,
+            attack=attack,
+            model=model,
+            repeat_index=repeat_index,
+            transcript=transcript,
+            passed=result.passed,
+            checker_output=result.output,
+            evidence=result.evidence,
+            applicable=result.applicable,
+        )
+        if result.applicable:
+            # 01-18: a run that tested nothing is not an ATTEMPT either —
+            # counting it here would tell the technique recommender this
+            # technique tried and failed to break something it never attacked.
+            await _record_technique_stats(
+                conn,
+                technique_id=attack.technique_id,
+                rule_category=rule["category"],
+                surface_kind=attack.surface_kind,
+                broke=broke,
+            )
+        state.attacks_done += 1
+        # PROGRESS-01: one persisted, sequenced event per attack — the runner's
+        # whole progress-write seam (`write_progress` also updates the same
+        # `scans` counters this UPDATE used to set inline; see `snag.api.sse`).
+        # The SSE stream tails `scan_events` by seq, so a refresh/reconnect
+        # resumes here.
+        await write_progress(
+            conn,
+            scan_id,
+            kind="attack",
+            data={
+                "technique_id": attack.technique_id,
+                "rule_id": int(rule["id"]),
+                "surface_id": int(surface["id"]),
+                "broke": broke,
+                "attacks_done": state.attacks_done,
+                "cost": str(state.spend_total),
+            },
+            rule_id=int(rule["id"]),
+            surface_id=int(surface["id"]),
+            call_count=state.call_count,
+            cost=state.spend_total,
+            attacks_done=state.attacks_done,
+            broke=broke,
+        )
+
+    # TIER 2 cross-check: queue this run for an independent second opinion —
+    # HELD or BROKEN, because a text search misses in both directions, and only
+    # when the checker answers a question of MEANING rather than a question of
+    # fact (`is_judgment_check`). The row is already written and already stands;
+    # all a cross-check can do is attach a disagreement to it.
+    reply_text = transcript.assistant_text()
+    if (
+        judge_model is not None
+        and result.applicable
+        and reply_text.strip()
+        and is_judgment_check(rule["checker_type"], checker_config)
+    ):
+        pending_checks.append(
+            _PendingCrossCheck(
+                run_id=run_id,
+                rule_id=int(rule["id"]),
+                surface_id=int(surface["id"]),
+                passed=result.passed,
+                pair=JudgePair(
+                    ref=f"x{len(pending_checks)}",
+                    rule_text=rule["text"],
+                    intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
+                    reply=reply_text,
+                ),
+            )
+        )
+        if len(pending_checks) >= JUDGE_BATCH_SIZE and not budget_hit:
+            try:
+                await _flush_cross_checks(
+                    db,
+                    completions=completions, judge_model=judge_model, state=state,
+                    pending=pending_checks, dispatch=dispatch,
+                )
+            except BudgetExceeded:
+                budget_hit = True
+    return budget_hit
+
+
 async def _mark_scan_running(db: Database, scan_id: int) -> None:
     async with db.acquire() as conn:
         await conn.execute(
@@ -1267,6 +1802,8 @@ async def _run_scan(
     await _mark_scan_running(db, scan_id)
 
     per_call_cost = await _projected_per_call_cost(model, transport=cost_transport)
+    concurrency = get_settings().scan_concurrency
+    limiter = _AdaptiveLimiter(ceiling=concurrency)
     state = _RunState(
         model=model,
         run_id=f"scan:{scan_id}",
@@ -1274,8 +1811,66 @@ async def _run_scan(
         spend_cap=scan["spend_cap"],
         per_call_cost=per_call_cost,
         call_count=scan["call_count"] or 0,
+        limiter=limiter,
     )
 
+    # The adaptive limiter's DECREASE signal: an adapter that can report a 429
+    # (the real OpenRouter one does; `FakeCompletions` does not) drives the
+    # limiter down and pauses launches the moment it is throttled, before its
+    # own retries turn the excess into a storm. Absent the capability the
+    # limiter simply climbs to and holds the ceiling — a plain bounded gather.
+    cancel_retry_listener: Callable[[], None] | None = None
+    if isinstance(completions, RetryListening):
+        cancel_retry_listener = completions.add_retry_listener(limiter.record_rate_limited)
+    try:
+        await _run_scan_body(
+            db,
+            scan_id,
+            completions=completions,
+            state=state,
+            limiter=limiter,
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            tool_schemas=tool_schemas,
+            surface_categories=surface_categories,
+            attacks=attacks,
+            judged_attacks=judged_attacks,
+            judge_model=judge_model,
+            rule_rows=rule_rows,
+            judged_rule_rows=judged_rule_rows,
+            surface_rows=surface_rows,
+            project=project,
+            repeats=repeats,
+            total_planned=total_planned,
+        )
+    finally:
+        if cancel_retry_listener is not None:
+            cancel_retry_listener()
+
+
+async def _run_scan_body(
+    db: Database,
+    scan_id: int,
+    *,
+    completions: Completions,
+    state: _RunState,
+    limiter: _AdaptiveLimiter,
+    model: str,
+    system_prompt: str,
+    tools: tuple[dict[str, Any], ...] | None,
+    tool_schemas: dict[str, dict[str, Any]],
+    surface_categories: frozenset[str],
+    attacks: list[Attack],
+    judged_attacks: list[Attack],
+    judge_model: str | None,
+    rule_rows: Sequence[Any],
+    judged_rule_rows: Sequence[Any],
+    surface_rows: Sequence[Any],
+    project: Any,
+    repeats: int,
+    total_planned: int,
+) -> None:
     try:
         setup = await _run_setup(rule_rows, completions, model, system_prompt, state)
     except BudgetExceeded:
@@ -1295,275 +1890,93 @@ async def _run_scan(
     ) -> CompletionResponse:
         return cast(CompletionResponse, await _dispatch(client, request, state))
 
-    pending_judged: list[_PendingJudged] = []
-    pending_checks: list[_PendingCrossCheck] = []
-
+    # The attack matrix as a flat, deterministically ordered list of units —
+    # same rules x surfaces x techniques x repeats, in the same order as
+    # before. Only the SCHEDULING changes below: units dispatch concurrently
+    # (bounded by the adaptive limiter) and are processed as their replies
+    # arrive, instead of one fully finished before the next begins.
     tiered_attacks = [(a, MECHANICAL_TIER) for a in attacks]
     tiered_attacks += [(a, JUDGED_TIER) for a in judged_attacks]
+    units = _build_units(
+        tiered_attacks,
+        rule_by_id=rule_by_id,
+        surface_by_id=surface_by_id,
+        setup=setup,
+        tools=tools,
+        tool_schemas=tool_schemas,
+        surface_categories=surface_categories,
+        repeats=repeats,
+    )
 
-    for attack, tier in tiered_attacks:
-        rule = rule_by_id[attack.rule_id]
-        surface = surface_by_id[attack.surface_id]
-        checker_config = (
-            _effective_checker_config(rule, attack, setup) if tier == MECHANICAL_TIER else {}
+    pending_judged: list[_PendingJudged] = []
+    pending_checks: list[_PendingCrossCheck] = []
+    budget_hit = False
+
+    factories = [
+        partial(
+            _dispatch_attack_unit,
+            unit,
+            completions=completions,
+            system_prompt=system_prompt,
+            tool_schemas=tool_schemas,
+            state=state,
         )
-        tools_for_attack = tools if attack.surface_kind == TOOL_ABUSE_KIND else None
+        for unit in units
+    ]
 
-        # MULTI-TURN pads every chat attack to depth >= 3 with the generic
-        # escalation lead-ins when the category is selected; plain "direct"
-        # (no "multiturn") leaves a technique's own turns untouched — see the
-        # module docstring for why this is a mode switch, not a second pass.
-        # A technique that scripts its own escalation (`escalation_ladder`'s
-        # four rungs) is already past the minimum depth, so it runs its own
-        # script either way and never picks up runner-invented filler.
-        turns_override: tuple[str, ...] | None = None
-        if attack.surface_kind == DIRECT_KIND and "multiturn" in surface_categories:
-            base_turns = (
-                attack.prompt_or_turns
-                if isinstance(attack.prompt_or_turns, tuple)
-                else (attack.prompt_or_turns,)
+    async for outcome in _as_completed_bounded(factories, limiter=limiter):
+        if outcome.kind == "budget":
+            # This unit hit a cap mid-dispatch and abandoned itself unpersisted
+            # (exactly as a sequential partial multi-turn was abandoned). Other
+            # units that already dispatched cleanly are still drained and
+            # persisted below; the scan is only marked stopped at the very end.
+            budget_hit = True
+            continue
+        if outcome.kind == "tools":
+            log.warning(
+                "scan.tools_unsupported",
+                scan_id=scan_id,
+                model=model,
+                attack=outcome.unit.attack.key(),
             )
-            turns_override = _pad_to_multiturn_depth(base_turns)
+            if not state.tool_support_note_recorded:
+                async with db.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE scans SET tool_support_note = $2 WHERE id = $1",
+                        scan_id,
+                        "skipped: model has no tool support",
+                    )
+                state.tool_support_note_recorded = True
+            continue
+        if outcome.kind == "error":
+            # A transient provider failure on ONE attack must not lose every
+            # other already-completed and yet-to-run attack in a scan that may
+            # cover hundreds of dispatches.
+            log.warning(
+                "scan.attack_dispatch_failed",
+                scan_id=scan_id,
+                attack=outcome.unit.attack.key(),
+                error=outcome.error,
+            )
+            continue
 
-        technique = TECHNIQUE_BY_ID[attack.technique_id]
-        indirect_technique = technique if attack.surface_kind == INDIRECT_KIND else None
-        # §S1: only the direct/tool paths can forge a turn. The INDIRECT path
-        # builds its own fixed exchange (`_execute_indirect_attack`) and no
-        # technique in the `prefill` family reaches `tool_return`, so there is
-        # nothing to thread through there.
-        prefill = technique.prefill
-        indirect_tool_name = (
-            _tool_name_from_surface_path(surface["path"])
-            if attack.surface_kind == INDIRECT_KIND
-            else ""
+        budget_hit = await _process_unit(
+            outcome,
+            db=db,
+            scan_id=scan_id,
+            completions=completions,
+            state=state,
+            model=model,
+            judge_model=judge_model,
+            pending_judged=pending_judged,
+            pending_checks=pending_checks,
+            dispatch=_capped_dispatch,
+            budget_hit=budget_hit,
         )
 
-        for repeat_index in range(repeats):
-            try:
-                if indirect_technique is not None:
-                    transcript, final_response = await _execute_indirect_attack(
-                        attack,
-                        completions=completions,
-                        technique=indirect_technique,
-                        tool_name=indirect_tool_name,
-                        tool_schema=tool_schemas.get(indirect_tool_name, {}),
-                        variant=_indirect_variant_for_repeat(repeat_index),
-                        system_prompt=system_prompt,
-                        state=state,
-                    )
-                else:
-                    transcript, final_response = await _execute_attack(
-                        attack,
-                        completions=completions,
-                        tools=tools_for_attack,
-                        system_prompt=system_prompt,
-                        state=state,
-                        turns_override=turns_override,
-                        tool_schemas=tool_schemas,
-                        prefill=prefill,
-                    )
-            except BudgetExceeded:
-                await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
-                return
-            except ToolsNotSupportedError:
-                log.warning(
-                    "scan.tools_unsupported", scan_id=scan_id, model=model, attack=attack.key()
-                )
-                if not state.tool_support_note_recorded:
-                    async with db.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE scans SET tool_support_note = $2 WHERE id = $1",
-                            scan_id,
-                            "skipped: model has no tool support",
-                        )
-                    state.tool_support_note_recorded = True
-                continue
-            except CompletionError as exc:
-                # A transient provider failure on ONE attack must not lose
-                # every other already-completed and yet-to-run attack in a
-                # scan that may cover hundreds of dispatches.
-                log.warning(
-                    "scan.attack_dispatch_failed",
-                    scan_id=scan_id,
-                    attack=attack.key(),
-                    error=repr(exc),
-                )
-                continue
-
-            # 01-18: never let a verdict computed over a reply that never
-            # arrived (empty, or truncated at max_tokens) be recorded as
-            # "the rule held against this attack".
-            unusable_reason = _unusable_reply_reason(final_response)
-
-            if tier == JUDGED_TIER:
-                assert judge_model is not None  # no judge, no judged attacks
-                reply = transcript.assistant_text()
-                judged_item = _PendingJudged(
-                    attack=attack,
-                    rule=rule,
-                    surface=surface,
-                    repeat_index=repeat_index,
-                    transcript=transcript,
-                    pair=JudgePair(
-                        # Unique within the batch this item will ride in —
-                        # the whole re-association contract (see
-                        # `snag.judge.JudgePair`).
-                        ref=f"j{len(pending_judged)}",
-                        rule_text=rule["text"],
-                        intent=checker_intent(rule["text"], rule["direction"], rule["category"]),
-                        reply=reply,
-                    ),
-                )
-                if unusable_reason is not None or not reply.strip():
-                    # Nothing to quote means nothing to judge, and spending a
-                    # judge call to be told so would be waste. Recorded as the
-                    # not-applicable third state, exactly as the mechanical
-                    # tier records an unscorable reply.
-                    await _persist_unjudged(
-                        db,
-                        scan_id,
-                        item=judged_item,
-                        state=state,
-                        reason=unusable_reason or "the model returned an empty reply",
-                    )
-                    continue
-                pending_judged.append(judged_item)
-                if len(pending_judged) >= JUDGE_BATCH_SIZE:
-                    try:
-                        await _flush_judged(
-                            db, scan_id,
-                            completions=completions, judge_model=judge_model, state=state,
-                            pending=pending_judged, dispatch=_capped_dispatch,
-                        )
-                    except BudgetExceeded:
-                        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
-                        return
-                continue
-
-            try:
-                result = run_checker(rule["checker_type"], transcript, checker_config)
-            except (KeyError, TypeError, ValueError, re.error) as exc:
-                # A rule's checker_config can be malformed or missing a key
-                # its own checker_type requires — extraction (LLM-first, no
-                # provider-enforced json_schema) or a hand-typed rule can
-                # both produce a checker_type/checker_config pairing that
-                # doesn't line up (e.g. `tool_call_order` needs `tool_a`/
-                # `tool_b`; a config missing either used to KeyError the
-                # entire scan). Same isolation discipline as the
-                # CompletionError branch above: one attack's config problem
-                # must not lose every other already-completed and
-                # yet-to-run attack in the scan.
-                log.warning(
-                    "scan.checker_config_mismatch",
-                    scan_id=scan_id,
-                    attack=attack.key(),
-                    checker_type=rule["checker_type"],
-                    error=repr(exc),
-                )
-                continue
-
-            result = _scored_result(result, unusable_reason)
-            if not result.applicable:
-                log.warning(
-                    "scan.reply_not_scorable",
-                    scan_id=scan_id,
-                    attack=attack.key(),
-                    reason=unusable_reason or result.output,
-                )
-            broke = not result.passed
-
-            async with db.acquire() as conn:
-                run_id = await _persist_attack_run(
-                    conn,
-                    scan_id=scan_id,
-                    rule=rule,
-                    surface=surface,
-                    attack=attack,
-                    model=model,
-                    repeat_index=repeat_index,
-                    transcript=transcript,
-                    passed=result.passed,
-                    checker_output=result.output,
-                    evidence=result.evidence,
-                    applicable=result.applicable,
-                )
-                if result.applicable:
-                    # 01-18: a run that tested nothing is not an ATTEMPT
-                    # either — counting it here would tell the technique
-                    # recommender this technique tried and failed to break
-                    # something it never actually attacked.
-                    await _record_technique_stats(
-                        conn,
-                        technique_id=attack.technique_id,
-                        rule_category=rule["category"],
-                        surface_kind=attack.surface_kind,
-                        broke=broke,
-                    )
-                state.attacks_done += 1
-                # PROGRESS-01: one persisted, sequenced event per attack —
-                # the runner's whole progress-write seam (`write_progress`
-                # also updates the same `scans` counters this UPDATE used to
-                # set inline; see `snag.api.sse`). The SSE stream tails
-                # `scan_events` by seq, so a refresh/reconnect resumes here.
-                await write_progress(
-                    conn,
-                    scan_id,
-                    kind="attack",
-                    data={
-                        "technique_id": attack.technique_id,
-                        "rule_id": int(rule["id"]),
-                        "surface_id": int(surface["id"]),
-                        "broke": broke,
-                        "attacks_done": state.attacks_done,
-                        "cost": str(state.spend_total),
-                    },
-                    rule_id=int(rule["id"]),
-                    surface_id=int(surface["id"]),
-                    call_count=state.call_count,
-                    cost=state.spend_total,
-                    attacks_done=state.attacks_done,
-                    broke=broke,
-                )
-
-            # TIER 2 cross-check: queue this run for an independent second
-            # opinion — HELD or BROKEN, because a text search misses in both
-            # directions, and only when the checker answers a question of
-            # MEANING rather than a question of fact (`is_judgment_check`).
-            # The row is already written and already stands; all a
-            # cross-check can do is attach a disagreement to it.
-            reply_text = transcript.assistant_text()
-            if (
-                judge_model is not None
-                and result.applicable
-                and reply_text.strip()
-                and is_judgment_check(rule["checker_type"], checker_config)
-            ):
-                pending_checks.append(
-                    _PendingCrossCheck(
-                        run_id=run_id,
-                        rule_id=int(rule["id"]),
-                        surface_id=int(surface["id"]),
-                        passed=result.passed,
-                        pair=JudgePair(
-                            ref=f"x{len(pending_checks)}",
-                            rule_text=rule["text"],
-                            intent=checker_intent(
-                                rule["text"], rule["direction"], rule["category"]
-                            ),
-                            reply=reply_text,
-                        ),
-                    )
-                )
-                if len(pending_checks) >= JUDGE_BATCH_SIZE:
-                    try:
-                        await _flush_cross_checks(
-                            db,
-                            completions=completions, judge_model=judge_model, state=state,
-                            pending=pending_checks, dispatch=_capped_dispatch,
-                        )
-                    except BudgetExceeded:
-                        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
-                        return
+    if budget_hit:
+        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+        return
 
     # Whatever is left in either buffer after the matrix. A partial batch is
     # still a batch — leaving it unsent would mean a run persisted as judged
@@ -1591,10 +2004,12 @@ async def _run_scan(
     # guard as every attack above it (T-13-01), never a second, uncapped
     # dispatch call site (see the module's own structural test in
     # test_budget_caps.py, which greps this module for how many times its
-    # ONE completions call method is invoked).
-    for item in GAP_CHECKLIST:
+    # ONE completions call method is invoked). Concurrent, bounded by the same
+    # adaptive limiter, so the concurrency it learned during the matrix carries
+    # straight into the probe pass.
+    async def _run_gap_probe(item: GapChecklistItem) -> _GapOutcome:
         try:
-            gap_result = await probe_gap(
+            result = await probe_gap(
                 completions,
                 project=project,
                 item=item,
@@ -1604,21 +2019,41 @@ async def _run_scan(
                 dispatch=_capped_dispatch,
             )
         except BudgetExceeded:
-            await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
-            return
+            return _GapOutcome(item, "budget")
         except ToolsNotSupportedError:
-            log.warning("scan.gap_probe_tools_unsupported", scan_id=scan_id, item=item.key)
-            continue
+            return _GapOutcome(item, "tools")
         except CompletionError as exc:
+            return _GapOutcome(item, "error", error=repr(exc))
+        return _GapOutcome(item, "ok", result=result)
+
+    gap_factories = [partial(_run_gap_probe, item) for item in GAP_CHECKLIST]
+    gap_budget_hit = False
+    async for gap_outcome in _as_completed_bounded(gap_factories, limiter=limiter):
+        if gap_outcome.kind == "budget":
+            gap_budget_hit = True
+            continue
+        if gap_outcome.kind == "tools":
             log.warning(
-                "scan.gap_probe_dispatch_failed", scan_id=scan_id, item=item.key, error=repr(exc)
+                "scan.gap_probe_tools_unsupported", scan_id=scan_id, item=gap_outcome.item.key
             )
             continue
-
+        if gap_outcome.kind == "error":
+            log.warning(
+                "scan.gap_probe_dispatch_failed",
+                scan_id=scan_id,
+                item=gap_outcome.item.key,
+                error=gap_outcome.error,
+            )
+            continue
+        assert gap_outcome.result is not None
         async with db.acquire() as conn:
             await persist_gap(
-                conn, scan_id=scan_id, project_id=project["id"], result=gap_result
+                conn, scan_id=scan_id, project_id=project["id"], result=gap_outcome.result
             )
+
+    if gap_budget_hit:
+        await _stop_at_cap(db, scan_id, state, total_planned=total_planned)
+        return
 
     await _mark_scan_completed(db, scan_id, state)
 

@@ -7,7 +7,9 @@ plain httpx doesn't already have.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -86,10 +88,26 @@ class OpenRouterCompletions:
         self._ledger = ledger or CostLedger()
         self._max_attempts = max_attempts
         self._today = clock or (lambda: datetime.now(UTC).date())
+        self._retry_listeners: list[Callable[[], None]] = []
 
     @property
     def ledger(self) -> CostLedger:
         return self._ledger
+
+    def add_retry_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """`substrate.llm.RetryListening`: register `listener` to be called the
+        moment a 429 is seen, before this adapter backs off and retries. Fires
+        for every registered listener (a broadcast — concurrent scans share
+        one provider rate limit, so all of them should ease off together).
+        Returns a cancel callback; call it when the caller no longer wants the
+        signal."""
+        self._retry_listeners.append(listener)
+
+        def _cancel() -> None:
+            with contextlib.suppress(ValueError):
+                self._retry_listeners.remove(listener)
+
+        return _cancel
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         last: Exception | None = None
@@ -103,6 +121,8 @@ class OpenRouterCompletions:
                 continue
 
             if raw.status_code in _RETRYABLE_STATUS:
+                if raw.status_code == 429:
+                    self._notify_rate_limited()
                 last = httpx.HTTPStatusError(
                     f"{raw.status_code} from OpenRouter", request=raw.request, response=raw
                 )
@@ -137,6 +157,11 @@ class OpenRouterCompletions:
         raise CompletionError(
             f"{self._max_attempts} attempts failed for model {request.model}"
         ) from last
+
+    def _notify_rate_limited(self) -> None:
+        # A snapshot: a listener's cancel could mutate the list mid-broadcast.
+        for listener in list(self._retry_listeners):
+            listener()
 
     async def _backoff(self, attempt: int, exc: Exception) -> None:
         delay = full_jitter_delay(attempt)

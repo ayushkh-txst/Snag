@@ -344,6 +344,19 @@ Correct output:
 Notice example 2's last line ("This bot is the best support experience on \
 the market.") produced NO rule — it is promotional prose, not a constraint.
 
+Two checker_config notes worth getting right:
+
+- `required_text.strings` is a list of ALTERNATIVES by default — any one of \
+them satisfies the rule. List the synonyms a compliant reply might plausibly \
+use ("licensed provider", "doctor", "clinician"), not a single narrow token. \
+Add `"match": "all"` only when the rule genuinely demands every string, e.g. \
+"include both the order number and the tracking link".
+- `forbidden_text.strings` holding a literal SECRET VALUE — a code, a key, a \
+password, an internal identifier — should also carry `"literal_secret": \
+true`. That tells the checker any occurrence is a leak, however the reply \
+frames it, since refusing to share a code while printing it is still \
+sharing it.
+
 Respond with a single JSON object shaped exactly like the examples above: \
 {{"rules": [...]}}. No prose, no markdown fences, just the JSON object.
 """

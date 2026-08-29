@@ -59,7 +59,7 @@ from snag.attacks.instantiate import Rule as AttackRule
 from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUE_BY_ID, Technique, techniques_for_model
 from snag.checkers import CheckResult, run_checker
-from snag.checkers.flow import _DEFAULT_REFUSAL_MARKERS
+from snag.checkers.refusal import DEFAULT_REFUSAL_MARKERS
 from snag.checkers.transcript import Transcript, Turn
 from snag.cost import estimate_scan_cost
 from snag.gaps import GAP_CHECKLIST, persist_gap, probe_gap
@@ -368,17 +368,17 @@ def _effective_checker_config(rule: Any, attack: Attack, setup: _ScanSetup) -> d
     if setup.translations:
         config.setdefault("translations", setup.translations)
     if setup.refusal_markers:
-        # UNION with checkers.flow's own hardcoded defaults, never a
+        # UNION with checkers.refusal's own hardcoded defaults, never a
         # replacement (01-15, found against a live model): a marker
         # `_generate_refusal_markers` invents is a whole invented sentence
         # ("i can't provide that assistance") that almost never appears
         # verbatim in a reply refusing something topic-specific ("i can't
         # provide tax or legal advice") — real refusals matched the short,
-        # generic defaults (flow.py's own `_DEFAULT_REFUSAL_MARKERS`) far
+        # generic defaults (`refusal.DEFAULT_REFUSAL_MARKERS`) far
         # more reliably than anything this setup call generates. A rule
         # that already set its own explicit `refusal_markers` is still
         # respected untouched (`setdefault` below only fires when absent).
-        config.setdefault("refusal_markers", [*_DEFAULT_REFUSAL_MARKERS, *setup.refusal_markers])
+        config.setdefault("refusal_markers", [*DEFAULT_REFUSAL_MARKERS, *setup.refusal_markers])
     if attack.canary:
         config["canary"] = attack.canary
     # A structural fact about THIS attack, not a user-editable config value

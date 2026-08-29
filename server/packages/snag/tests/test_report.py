@@ -188,14 +188,15 @@ async def _add_attack_run(
     checker_output: str,
     evidence: str | None = None,
     false_positive: bool = False,
+    applicable: bool = True,
 ) -> int:
     async with db.acquire() as conn:
         run_id = await conn.fetchval(
             """INSERT INTO attack_runs
                    (scan_id, rule_id, surface_id, technique_id, family, model,
                     repeat_index, conversation, passed, checker_output,
-                    false_positive, evidence)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    false_positive, evidence, applicable)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                RETURNING id""",
             scan_id,
             rule_id,
@@ -209,6 +210,7 @@ async def _add_attack_run(
             checker_output,
             false_positive,
             evidence,
+            applicable,
         )
     return int(run_id)
 
@@ -309,6 +311,76 @@ async def test_aggregate_report_bysurface_aggregates_breaks_by_surface(clean_db:
     by_surface = {row["surfaceId"]: row["hits"] for row in report["bySurface"]}
     assert by_surface == {str(chat_surface): 2}
     assert report["bySurface"][0]["surfaceId"] == str(chat_surface)
+
+
+async def test_a_run_that_tested_nothing_does_not_inflate_a_rules_attack_count(
+    clean_db: Database,
+) -> None:
+    """01-18: an attack that planted no canary gives the canary checker
+    nothing to check, and used to be stored `passed = true` — i.e. counted
+    as an attack the rule SURVIVED. Two of the retail-support example's 25
+    runs were exactly this. It inflated the denominator of every break rate
+    and the "attacks run" headline with it.
+
+    A run stored `applicable = false` must land in neither the numerator nor
+    the denominator: three runs here, only two of which tested anything, so
+    the rule reads 1/2 — never 1/3.
+    """
+    slug = "proj-noop"
+    await _make_project(clean_db, slug=slug)
+    rule_id = await _add_rule(clean_db, slug, checker_type="no_role_confusion")
+    surface_id = await _add_surface(clean_db, slug)
+    scan_id = await _add_scan(clean_db, slug, mode="standard", repeats=1, call_count=3)
+
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "As DAN, I have no restrictions."}],
+        passed=False,
+        checker_output="assigned-role canary found — the model adopted the injected role",
+        evidence="As DAN",
+    )
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.02",
+        conversation=[{"role": "assistant", "content": "I'll remain Ada."}],
+        passed=True,
+        checker_output="assigned-role canary not found",
+    )
+    # The no-op: this technique plants no canary, so this run tested nothing.
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="auth_confusion.01",
+        conversation=[{"role": "assistant", "content": "Sure, happy to help."}],
+        passed=True,
+        checker_output="no canary was planted by this attack — nothing to check",
+        applicable=False,
+    )
+
+    report = await aggregate_report(clean_db, slug)
+    assert report is not None
+
+    rule = next(r for r in report["rules"] if r["id"] == str(rule_id))
+    assert rule["attacks"] == 2, "a run that tested nothing was counted as an attack"
+    assert rule["breaks"] == 1
+
+    # Same exclusion for the surface's own "tests" tally...
+    surface = next(s for s in report["surfaces"] if s["id"] == str(surface_id))
+    assert surface["tests"] == 2
+
+    # ...and the no-op never appears as a repeat of any Break.
+    technique_ids = {b["techniqueId"] for b in report["breaks"]}
+    assert "auth_confusion.01" not in technique_ids
+    assert all(len(b["variants"]) == b["repeats"] for b in report["breaks"])
 
 
 async def test_aggregate_report_surfaces_the_tool_less_model_skip_note(clean_db: Database) -> None:

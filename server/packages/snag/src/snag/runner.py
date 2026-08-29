@@ -604,7 +604,12 @@ async def _persist_attack_run(
     passed: bool,
     checker_output: str,
     evidence: str | None,
+    applicable: bool = True,
 ) -> None:
+    """`applicable=False` records a run that tested NOTHING (01-18) — the
+    dispatch happened and its transcript is kept, but `snag.report` counts
+    it in neither the numerator nor the denominator of any break rate, so
+    it can never be reported as "the rule held against this attack"."""
     turns_json = [_turn_to_json(t) for t in transcript.turns]
     if evidence and turns_json:
         turns_json[-1] = {**turns_json[-1], "evidence": evidence}
@@ -612,8 +617,8 @@ async def _persist_attack_run(
         """INSERT INTO attack_runs
                (scan_id, rule_id, surface_id, technique_id, family, model,
                 repeat_index, conversation, passed, checker_output,
-                false_positive, planted, evidence)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12)""",
+                false_positive, planted, evidence, applicable)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12, $13)""",
         scan_id,
         int(rule["id"]),
         int(surface["id"]),
@@ -626,6 +631,7 @@ async def _persist_attack_run(
         checker_output,
         _planted_text(attack),
         evidence,
+        applicable,
     )
 
 
@@ -960,6 +966,7 @@ async def _run_scan(
                     error=repr(exc),
                 )
                 continue
+
             broke = not result.passed
 
             async with db.acquire() as conn:
@@ -975,14 +982,20 @@ async def _run_scan(
                     passed=result.passed,
                     checker_output=result.output,
                     evidence=result.evidence,
+                    applicable=result.applicable,
                 )
-                await _record_technique_stats(
-                    conn,
-                    technique_id=attack.technique_id,
-                    rule_category=rule["category"],
-                    surface_kind=attack.surface_kind,
-                    broke=broke,
-                )
+                if result.applicable:
+                    # 01-18: a run that tested nothing is not an ATTEMPT
+                    # either — counting it here would tell the technique
+                    # recommender this technique tried and failed to break
+                    # something it never actually attacked.
+                    await _record_technique_stats(
+                        conn,
+                        technique_id=attack.technique_id,
+                        rule_category=rule["category"],
+                        surface_kind=attack.surface_kind,
+                        broke=broke,
+                    )
                 state.attacks_done += 1
                 # PROGRESS-01: one persisted, sequenced event per attack —
                 # the runner's whole progress-write seam (`write_progress`

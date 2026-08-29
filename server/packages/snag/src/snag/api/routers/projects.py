@@ -151,7 +151,12 @@ _RULE_SELECT = """\
            COALESCE(a.breaks, 0) AS breaks
     FROM rules r
     LEFT JOIN (
-        SELECT rule_id, COUNT(*) AS attacks, COUNT(*) FILTER (WHERE NOT passed) AS breaks
+        -- `applicable` filter (01-18): a run that tested nothing (no canary
+        -- to check, an empty/truncated reply) is not an attack this rule
+        -- survived — same exclusion `snag.report` applies.
+        SELECT rule_id,
+               COUNT(*) FILTER (WHERE applicable) AS attacks,
+               COUNT(*) FILTER (WHERE applicable AND NOT passed) AS breaks
         FROM attack_runs
         GROUP BY rule_id
     ) a ON a.rule_id = r.id

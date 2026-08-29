@@ -28,8 +28,15 @@ from snag.attacks.instantiate import Surface as AttackSurface
 from snag.attacks.library import TECHNIQUES, RuleCategory, SurfaceKind
 from snag.cost import ModelPricing
 from snag.gaps import GAP_CHECKLIST
+from snag.report import aggregate_report
 from substrate.db import Database
-from substrate.llm import CompletionResponse, Completions, FakeCompletions, StopReason, TokenUsage
+from substrate.llm import (
+    CompletionResponse,
+    Completions,
+    FakeCompletions,
+    StopReason,
+    TokenUsage,
+)
 from substrate.queue import Worker
 
 ClientFactory = Callable[[FakeCompletions], AbstractAsyncContextManager[httpx.AsyncClient]]
@@ -617,3 +624,66 @@ async def test_run_scan_handler_only_attacks_seam_runs_just_that_subset(
         runs = await conn.fetch("SELECT * FROM attack_runs WHERE scan_id = $1", scan_id)
     assert len(runs) == 1
     assert runs[0]["technique_id"] == target.technique_id
+
+
+# ------------------------------------------- 01-18: runs that tested nothing
+
+
+async def test_an_attack_that_planted_no_canary_is_stored_as_not_applicable(
+    client_factory: ClientFactory, clean_db: Database, drain_scan_queue: DrainScanQueue
+) -> None:
+    """The live finding: `identity` rules match both `roleplay.01` (which
+    plants a canary) and `auth_confusion.01` (which plants none) on the chat
+    surface. The canary-less pairing gives `no_role_confusion` nothing to
+    check, and used to be stored `passed = true` — counted as an attack the
+    rule survived, inflating the denominator of its break rate and the
+    scan's attack count. It must be stored as not applicable instead."""
+    fake = FakeCompletions()
+    slug = "proj-noop-canary"
+    await _make_project(clean_db, slug=slug)
+    rule_id = await _add_rule(
+        clean_db, slug, category="identity", checker_type="no_role_confusion"
+    )
+    chat_id = await _add_surface(clean_db, slug, kind="chat", path="user message")
+
+    expected = instantiate(
+        [_attack_rule(rule_id, "identity")],
+        [_attack_surface(chat_id, kind="chat", path="user message")],
+    )
+    assert {a.technique_id for a in expected} == {"roleplay.01", "auth_confusion.01"}
+    fake.responses.extend(
+        _safe_response() for _ in range(_dispatch_count(expected, repeats=1) + len(GAP_CHECKLIST))
+    )
+
+    async with client_factory(fake) as client:
+        res = await client.post("/api/scans", json={"slug": slug, "mode": "quick"})
+        scan_id = res.json()["scan_id"]
+        worker = await drain_scan_queue(clean_db, fake)
+    assert worker.failed == 0
+
+    async with clean_db.acquire() as conn:
+        runs = {
+            r["technique_id"]: r
+            for r in await conn.fetch("SELECT * FROM attack_runs WHERE scan_id = $1", scan_id)
+        }
+    # Both runs are still STORED — the dispatch really happened and its
+    # transcript is worth keeping — but only one of them tested anything.
+    assert set(runs) == {"roleplay.01", "auth_confusion.01"}
+    assert runs["auth_confusion.01"]["applicable"] is False
+    assert runs["auth_confusion.01"]["passed"] is True  # never counted as a break either
+    assert runs["roleplay.01"]["applicable"] is True
+
+    # ...and the report counts one attack for this rule, not two.
+    report = await aggregate_report(clean_db, slug)
+    assert report is not None
+    rule = next(r for r in report["rules"] if r["id"] == str(rule_id))
+    assert rule["attacks"] == 1
+    assert rule["breaks"] == 0
+
+    # A run that tested nothing is not an ATTEMPT for the technique
+    # recommender either.
+    async with clean_db.acquire() as conn:
+        stats = {r["technique_id"]: r["attempts"] for r in await conn.fetch(
+            "SELECT * FROM technique_stats"
+        )}
+    assert stats == {"roleplay.01": 1}

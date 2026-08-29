@@ -25,6 +25,12 @@ must still suppress a brand new scan's break of the same identity
 itself is out of scope for this plan, so a freshly-inserted rescan row
 always starts with its OWN `false_positive = false` — this module, not the
 row, is what remembers the exclusion.
+
+Honest coverage (01-18): a stored run with `applicable = false` tested
+nothing — a canary checker handed an attack that planted no canary, or a
+reply that came back empty/truncated — and `_counted` drops it before ANY
+rate here is computed. It is neither a break nor an attack the rule
+survived, so it inflates neither `rule.breaks` nor `rule.attacks`.
 """
 
 from __future__ import annotations
@@ -60,6 +66,18 @@ on. Deliberately excludes `scan_id`: exclusion must survive a rescan."""
 
 def _break_key(run: asyncpg.Record) -> BreakKey:
     return (run["rule_id"], run["surface_id"], run["technique_id"])
+
+
+def _counted(runs: list[asyncpg.Record]) -> list[asyncpg.Record]:
+    """Only the runs that actually TESTED something (01-18). A run stored
+    with `applicable = false` — a canary checker handed an attack that
+    planted no canary, a reply that came back empty or truncated — exercised
+    nothing, so it belongs in neither the numerator nor the denominator of
+    any rate this module computes: not `rule.attacks`, not `rule.breaks`,
+    not `surface.tests`, not `bySurface`, not a `Break`'s `repeats`. Rows
+    stay in the DB (the transcript is real and inspectable); they are
+    simply not evidence about whether a rule held."""
+    return [r for r in runs if r["applicable"]]
 
 
 def _duration(started: datetime | None, finished: datetime | None) -> str:
@@ -203,7 +221,11 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
     # (CHECK-06) — everything else below is scoped to the latest scan only.
     excluded_keys = {_break_key(r) for r in all_run_rows if r["false_positive"]}
     latest_scan_id = scan_row["id"] if scan_row is not None else None
-    run_rows = [r for r in all_run_rows if r["scan_id"] == latest_scan_id] if latest_scan_id else []
+    run_rows = (
+        _counted([r for r in all_run_rows if r["scan_id"] == latest_scan_id])
+        if latest_scan_id
+        else []
+    )
 
     breaks = _build_breaks(run_rows, excluded_keys)
 
@@ -431,11 +453,12 @@ async def break_detail(db: Database, slug: str, break_id: str) -> dict[str, Any]
         )
         all_run_rows = await _fetch_all_runs(conn, slug)
 
-    if not runs:
+    counted = _counted(list(runs))
+    if not counted:
         return None
     key = _break_key(anchor)
     excluded = key in {_break_key(r) for r in all_run_rows if r["false_positive"]}
-    return _build_break_entry(key, list(runs), excluded=excluded)
+    return _build_break_entry(key, counted, excluded=excluded)
 
 
 async def set_false_positive(db: Database, slug: str, break_id: str, value: bool) -> bool:

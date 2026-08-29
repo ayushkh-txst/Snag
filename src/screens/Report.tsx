@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
@@ -13,6 +14,92 @@ import {
   type Example,
   type Rule,
 } from "../data";
+
+/** What was actually scanned. Collapsed by default — the findings come
+ *  first — but one click away, because every number on this page is only
+ *  meaningful against the exact prompt and tools that produced it. */
+function ScannedInput({ ex }: { ex: Example }) {
+  const [open, setOpen] = useState(false);
+  const lines = ex.systemPrompt.split("\n");
+
+  const toolsText = (() => {
+    const raw = ex.tools?.trim();
+    if (!raw || raw === "[]") return "";
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw; // not JSON we can pretty-print — show it exactly as sent
+    }
+  })();
+  const toolCount = (() => {
+    if (!toolsText) return 0;
+    try {
+      const parsed = JSON.parse(toolsText);
+      return Array.isArray(parsed) ? parsed.length : 1;
+    } catch {
+      return 1;
+    }
+  })();
+
+  return (
+    <section className="panel scanned">
+      <header className="panel__head">
+        <span className="label">what was scanned</span>
+        <div className="panel__aside">
+          <span className="mono dimmer">
+            {lines.length} lines
+            {toolCount > 0 && ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}`}
+          </span>
+          <button
+            type="button"
+            className="linky scanned__toggle"
+            aria-expanded={open}
+            aria-controls="scanned-body"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? "Hide" : "See the system prompt"}
+            <span className="scanned__chev" data-open={open || undefined} aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      {open && (
+        <div className="scanned__body" id="scanned-body">
+          <div className="scanned__pane">
+            <div className="srcpane__head">
+              <span className="label">system prompt</span>
+              <span className="mono dimmer">{lines.length} lines</span>
+            </div>
+            <div className="srcpane__body">
+              {lines.map((l, i) => (
+                <div className="srcline" key={i}>
+                  <span className="srcline__n mono">{String(i + 1).padStart(2, "0")}</span>
+                  <span className="srcline__t mono">{l || " "}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="scanned__pane">
+            <div className="srcpane__head">
+              <span className="label">tool definitions</span>
+              <span className="mono dimmer">{toolCount || "none"}</span>
+            </div>
+            <div className="srcpane__body">
+              {toolsText ? (
+                <pre className="scanned__tools mono">{toolsText}</pre>
+              ) : (
+                <p className="scanned__none dim">
+                  No tools were given. Snag could test what the model says, but not what it does.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function BreakRow({ ex, breakId }: { ex: Example; breakId: string }) {
   const b = ex.breaks.find((x) => x.id === breakId)!;
@@ -124,6 +211,8 @@ function ReportBody({ ex }: { ex: Example }) {
         <div className="stat"><div className="stat__n">{t.breaks}</div><div className="stat__label">breaks</div></div>
         <div className="stat"><div className="stat__n">{t.attacks}</div><div className="stat__label">attacks</div></div>
       </div>
+
+      <ScannedInput ex={ex} />
 
       {bySurface.length > 0 && (
         <section className="whereband">

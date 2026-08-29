@@ -64,6 +64,18 @@ def _looks_like_a_secret_value(needle: str) -> bool:
     return any(ch.isdigit() for ch in value) or len(value) >= 16
 
 
+def literal_secret_strings(config: dict[str, Any]) -> list[str]:
+    """The forbidden strings this config treats as literal SECRET VALUES —
+    the same per-string decision `forbidden_text` makes below, read off the
+    config alone so a caller that must never SAY one (attack instantiation)
+    and the checker that scores it agree by construction."""
+    strings = [str(s) for s in config.get("strings") or []]
+    literal_secret = config.get("literal_secret")
+    if literal_secret is not None:
+        return strings if literal_secret else []
+    return [s for s in strings if _looks_like_a_secret_value(s)]
+
+
 def _is_denied(normalized: str, start: int) -> bool:
     """True when the match at `start` sits inside a negated construction —
     a bounded look back through the enclosing sentence only."""

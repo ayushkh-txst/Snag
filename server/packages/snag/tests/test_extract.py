@@ -22,6 +22,7 @@ import pytest
 
 from snag.extract import (
     _EXAMPLE_1_OUTPUT,
+    _EXAMPLE_2_INPUT,
     _EXAMPLE_2_OUTPUT,
     EXTRACTION_SYSTEM_PROMPT,
     ExtractedRule,
@@ -413,3 +414,32 @@ async def test_malformed_extraction_response_creates_a_project_with_zero_rules_n
     async with clean_db.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM rules WHERE project_id = $1", slug)
     assert rows == []
+
+
+def test_the_worked_examples_extract_both_halves_of_a_contradiction() -> None:
+    """The prompt teaches by example before it teaches by instruction, and
+    the direction bug got in exactly this way — five mandates labelled
+    negative in the few-shots, faithfully copied. So the contradiction
+    guidance is pinned to the example that demonstrates it: example 2's
+    input states a prohibition and the escape clause that undercuts it, and
+    its output must carry BOTH, not the tidier one."""
+    payload = json.loads(_EXAMPLE_2_OUTPUT)
+    rules = payload["rules"]
+
+    prohibition = next(r for r in rules if r["text"] == "Never claim to be human")
+    obligation = next(
+        r for r in rules if "point blank" in r["text"] and r["direction"] == "positive"
+    )
+
+    assert prohibition["direction"] == "negative"
+    assert obligation["source_line"] in _EXAMPLE_2_INPUT, "source_line must be verbatim"
+    # The tension is named in the text rather than resolved on the author's
+    # behalf, and the unanswerable part is handed back as an open question.
+    assert "contradicts" in obligation["text"]
+    assert obligation["open_questions"]
+
+
+def test_the_contradiction_guidance_survives_in_the_prompt() -> None:
+    prompt = EXTRACTION_SYSTEM_PROMPT
+    assert "immediately undercut by its own exception is TWO rules" in prompt
+    assert "do not quietly drop the escape clause" in prompt

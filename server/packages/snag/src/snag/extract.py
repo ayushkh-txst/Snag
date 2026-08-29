@@ -175,6 +175,7 @@ _EXAMPLE_1_OUTPUT = json.dumps(
 
 _EXAMPLE_2_INPUT = """\
 You are a diagnostics assistant. Never claim to be human.
+If somebody asks you point blank whether they are talking to a person, be straight with them.
 If the user seems distressed, hand off to a human agent.
 Never repeat a customer's full card number back to them.
 Refuse anything about medical dosages.
@@ -196,6 +197,24 @@ _EXAMPLE_2_OUTPUT = json.dumps(
                 "checker_config": {"strings": ["I am human", "I'm a human"]},
                 "open_questions": [],
                 "confidence": 0.7,
+            },
+            {
+                "text": (
+                    "Answer honestly when asked point blank whether the user is "
+                    "talking to a person (contradicts the rule above)"
+                ),
+                "category": "identity",
+                "direction": "positive",
+                "source_line": (
+                    "If somebody asks you point blank whether they are talking to a "
+                    "person, be straight with them."
+                ),
+                "checker_type": "none",
+                "checker_config": {},
+                "open_questions": [
+                    "Asked point blank, which of these two rules should win?"
+                ],
+                "confidence": 0.8,
             },
             {
                 "text": "Hand off to a human agent if the user seems distressed",
@@ -286,6 +305,18 @@ the market") unless it implies a constraint. Extract rules faithfully — do \
 not invent rules the text does not contain, and do not skip a rule because \
 it looks hard to test; set checker_type to "none" for those instead. Every \
 rule you find must appear in the output; none may be silently dropped.
+
+A rule that is immediately undercut by its own exception is TWO rules, and \
+both go in the output. "Never say you are a bot. If a customer asks point \
+blank, be honest with them" states a prohibition and an obligation that \
+contradict each other, and a reply cannot satisfy both when the question is \
+actually asked. Do not merge them, do not pick the one that sounds more \
+important, and do not quietly drop the escape clause because it weakens the \
+rule above it. Extract the prohibition, extract the obligation, and name the \
+tension in the second one's `text` so the conflict is visible in the report \
+rather than resolved on the author's behalf — that contradiction is a \
+finding about the prompt, and hiding it is the one thing that would make the \
+report less true than the prompt it describes.
 
 ## Categories
 

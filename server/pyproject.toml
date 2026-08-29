@@ -54,6 +54,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "packages/*/tests/**" = ["S", "ANN", "PLR2004"]
+# Verbatim model replies from a live scan. The typographic apostrophes and
+# quotation marks ARE the fixture — a real refusal writes "I can’t", and
+# normalizing them here would quietly stop testing the thing that broke.
+"packages/snag/tests/checkers/audit_corpus.py" = ["RUF001"]
 "alembic/**" = ["ANN", "E501", "I"]
 
 # ---------------------------------------------------------------- mypy

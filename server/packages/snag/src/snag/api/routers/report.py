@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from snag.api.app import ctx
-from snag.api.deps import require_slug
+from snag.api.deps import require_mutable_slug, require_slug
 from snag.report import aggregate_report, break_detail, purge_expired_ephemeral, set_false_positive
 
 router = APIRouter()
@@ -61,7 +61,7 @@ async def get_break_detail(slug: str, break_id: str, request: Request) -> dict[s
 async def post_false_positive(
     slug: str, break_id: str, body: FalsePositiveRequest, request: Request
 ) -> FalsePositiveResponse:
-    await require_slug(request, slug)
+    await require_mutable_slug(request, slug)  # T-15-01: a seeded example's breaks are read-only
     state = ctx(request)
     found = await set_false_positive(state.db, slug, break_id, body.value)
     if not found:

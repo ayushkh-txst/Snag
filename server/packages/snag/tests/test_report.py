@@ -663,6 +663,50 @@ async def test_false_positive_toggle_for_unknown_break_is_404(
     assert res.status_code == 404
 
 
+async def test_false_positive_toggle_on_a_seeded_project_is_403(
+    client_factory: ClientFactory, clean_db: Database
+) -> None:
+    """T-15-01: a seeded example's breaks are a shared, key-free correctness
+    oracle — an anonymous visitor must never be able to alter one, the same
+    guard already enforced on project/rule/surface/question/scan/fix
+    mutations."""
+    slug = "proj-fp-seeded"
+    await _make_project(clean_db, slug=slug)
+    async with clean_db.acquire() as conn:
+        await conn.execute("UPDATE projects SET seeded = true WHERE id = $1", slug)
+    rule_id = await _add_rule(clean_db, slug)
+    surface_id = await _add_surface(clean_db, slug)
+    scan_id = await _add_scan(clean_db, slug, mode="quick", repeats=1, call_count=1)
+    await _add_attack_run(
+        clean_db,
+        scan_id=scan_id,
+        rule_id=rule_id,
+        surface_id=surface_id,
+        technique_id="roleplay.01",
+        conversation=[{"role": "assistant", "content": "leaked it"}],
+        passed=False,
+        checker_output="forbidden_text FAILED",
+        evidence="leaked it",
+    )
+
+    async with client_factory(FakeCompletions()) as client:
+        before = await client.get(f"/api/projects/{slug}/report")
+        break_id = before.json()["breaks"][0]["id"]
+
+        toggle = await client.post(
+            f"/api/projects/{slug}/report/{break_id}/false-positive", json={"value": True}
+        )
+        assert toggle.status_code == 403, toggle.text
+
+        after = await client.get(f"/api/projects/{slug}/report")
+
+    after_json = after.json()
+    rule_after = next(r for r in after_json["rules"] if r["id"] == str(rule_id))
+    assert rule_after["breaks"] == 1  # unchanged — the rejected toggle never wrote anything
+    fp_break = next(b for b in after_json["breaks"] if b["id"] == break_id)
+    assert fp_break["falsePositive"] is False
+
+
 # -------------------------------------------------- End-to-end (kept from 01-01)
 
 

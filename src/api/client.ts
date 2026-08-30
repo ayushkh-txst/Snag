@@ -514,6 +514,19 @@ export interface ScanRecord {
 /** GET /api/scans/{scanId} — the scan's own record (mode/repeats/model,
  * running counters), independent of the SSE stream — what Scanning.tsx
  * reads once up front to know what it's watching. */
+/** Which scan this project has in flight, or null. The durable answer to
+ * "is a run still going" — a typed URL or a second tab has no localStorage
+ * to fall back on, and the scanning screen used to declare a live run
+ * finished because of it. */
+export async function getActiveScan(
+  slug: string,
+): Promise<{ scanId: number | null; status: string | null }> {
+  const res = await request<{ scanId: number | null; status: string | null }>(
+    `/api/projects/${encodeURIComponent(slug)}/active-scan`,
+  );
+  return { scanId: res.scanId ?? null, status: res.status ?? null };
+}
+
 export function getScan(scanId: number): Promise<ScanRecord> {
   return request<{
     id: number;

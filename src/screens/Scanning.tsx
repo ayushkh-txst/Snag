@@ -4,7 +4,13 @@ import { Arrow } from "../components/ui";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
 import { useScanStream } from "../hooks/useScanStream";
-import { estimateScan, getScan, type ScanMode, type ScanRecord } from "../api/client";
+import {
+  estimateScan,
+  getActiveScan,
+  getScan,
+  type ScanMode,
+  type ScanRecord,
+} from "../api/client";
 
 const LAST_SCAN_KEY = (slug: string) => `snag:lastScan:${slug}`;
 
@@ -24,9 +30,40 @@ export function Scanning() {
   const location = useLocation();
   const { data: ex, loading, error, notFound } = useProject(slug);
 
-  const [scanId] = useState<number | null>(() =>
+  const [scanId, setScanId] = useState<number | null>(() =>
     readInitialScanId(slug, (location.state as { scanId?: number } | null)?.scanId),
   );
+  // Router state and localStorage only know about a scan this browser
+  // started. A typed URL, a second tab, or another device has neither, and
+  // the screen used to render "no scan in progress" — or worse, a finished
+  // run — while the worker was still going. The project row is the durable
+  // answer, so ask the server whenever the local hints come up empty.
+  const [resolvingScan, setResolvingScan] = useState(false);
+  useEffect(() => {
+    if (scanId != null || !slug) return;
+    let cancelled = false;
+    setResolvingScan(true);
+    getActiveScan(slug)
+      .then((active) => {
+        if (cancelled || active.scanId == null) return;
+        setScanId(active.scanId);
+        try {
+          localStorage.setItem(LAST_SCAN_KEY(slug), String(active.scanId));
+        } catch {
+          // private mode — the id still lives in state for this mount
+        }
+      })
+      .catch(() => {
+        // no active scan, or the lookup failed — fall through to the
+        // "nothing in progress" panel below rather than blocking on it
+      })
+      .finally(() => {
+        if (!cancelled) setResolvingScan(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scanId, slug]);
   const [scan, setScan] = useState<ScanRecord | null>(null);
   const [estimatedCalls, setEstimatedCalls] = useState<number | null>(null);
 
@@ -71,6 +108,8 @@ export function Scanning() {
   if (notFound) return <NotFound slug={slug} />;
   if (error) return <ErrorState error={error} />;
   if (!ex) return <Loading label="Loading…" />;
+
+  if (scanId == null && resolvingScan) return <Loading label="Looking for a scan…" />;
 
   if (scanId == null) {
     return (

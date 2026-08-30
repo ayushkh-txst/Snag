@@ -489,10 +489,35 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
             }
         ]
 
-    top_break = breaks[0] if breaks else None
-    top_output = top_break["checkerOutput"] if top_break else ""
-    broke_line = top_output.splitlines()[0] if top_output else ""
-    walkthrough = {"intent": "", "broke": broke_line, "why": "", "fix": ""}
+    # The headline is the report's own <h1>, so it has to read like a
+    # sentence about the scan. It used to be the first break's raw checker
+    # output — a page titled "forbidden text found: 'AI'", which is debug
+    # text, names one finding out of however many, and tells a reader
+    # nothing about the run. The count is what they came for.
+    broken_rule_count = sum(1 for r in rules if r["breaks"] > 0)
+    tested_rule_count = sum(1 for r in rules if r["attacks"] > 0)
+    if broken_rule_count:
+        headline = (
+            f"{broken_rule_count} of {tested_rule_count} "
+            f"{'rule' if tested_rule_count == 1 else 'rules'} broke."
+        )
+    elif tested_rule_count:
+        headline = f"Nothing broke across {tested_rule_count} rules."
+    else:
+        headline = "No breaks found yet."
+    # `walkthrough.broke` is the report's lede, directly under the headline.
+    # The raw checker output belongs beside the finding it came from, not as
+    # the page's opening sentence — it reads as a stray debug string there.
+    if broken_rule_count:
+        lede = (
+            "Each one below has the attack that did it and the model's own reply, "
+            "in full."
+        )
+    elif tested_rule_count:
+        lede = "Every attack in the matrix was answered without breaking a rule."
+    else:
+        lede = "Nothing has been attacked yet."
+    walkthrough = {"intent": "", "broke": lede, "why": "", "fix": ""}
 
     # PRIV-02: the purge clock starts here, and ONLY here — the one place
     # that has both `project` and `scan_row` already in scope. A genuinely
@@ -515,7 +540,7 @@ async def aggregate_report(db: Database, slug: str) -> dict[str, Any] | None:
         "title": project["name"] or project["id"],
         "blurb": "",
         "demonstrates": "",
-        "headline": broke_line or "No breaks found yet.",
+        "headline": headline,
         "model": project["model"],
         "systemPrompt": prompt_version["full_text"] if prompt_version else "",
         "tools": _tools_text(prompt_version),

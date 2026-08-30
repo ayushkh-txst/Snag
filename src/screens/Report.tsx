@@ -210,14 +210,16 @@ function LiveScanBanner({ slug }: { slug: string }) {
 
   if (active == null) return null;
   return (
-    <div className="panel" data-state="running">
-      <p>
-        A scan is still running for this project — these findings are partial and
-        will keep growing.
-      </p>
-      <Link className="btn" data-variant="ghost" to={`/e/${slug}/scanning`}>
-        Watch it run <Arrow />
-      </Link>
+    <div className="warnband">
+      <span className="warnband__mark mono">running</span>
+      <div>
+        <p className="warnband__h">This scan is still going.</p>
+        <p className="warnband__b">
+          Everything below is real as far as it goes, but the counts are partial and
+          will keep climbing until the run finishes.{" "}
+          <Link to={`/e/${slug}/scanning`}>Watch it run</Link>.
+        </p>
+      </div>
     </div>
   );
 }

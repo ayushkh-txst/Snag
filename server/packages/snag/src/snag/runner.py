@@ -913,6 +913,42 @@ async def _dispatch_attack_unit(
     return _UnitOutcome(unit, "ok", transcript=transcript, final_response=final_response)
 
 
+UnitKey = tuple[str, str, str, int]
+
+
+def unit_key(unit: Any) -> UnitKey:
+    """What makes two dispatches the same attack: the rule, the surface, the
+    technique and which repeat it is. Repeats are deliberately part of it —
+    running an attack N times is the point of `repeats`, not duplication."""
+    return (
+        str(unit.rule["id"]),
+        str(unit.surface["id"]),
+        unit.attack.technique_id,
+        unit.repeat_index,
+    )
+
+
+async def already_run_keys(db: Database, scan_id: int) -> set[UnitKey]:
+    """The attacks this scan has already recorded a run for.
+
+    A queued scan is a durable job with `max_attempts = 5`, so a worker that
+    dies mid-run — a deploy replacing the container, an OOM, a host recycling
+    — hands the same job to the next worker, which used to rebuild the whole
+    matrix and dispatch it from the top. Measured live: 421 stored runs for
+    331 distinct attacks, 90 re-run and some three times, every one of them a
+    paid call, with the break count inflated by whichever of them broke."""
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT rule_id, surface_id, technique_id, repeat_index
+                   FROM attack_runs WHERE scan_id = $1""",
+            scan_id,
+        )
+    return {
+        (str(r["rule_id"]), str(r["surface_id"]), r["technique_id"], r["repeat_index"])
+        for r in rows
+    }
+
+
 def _build_units(
     tiered_attacks: Sequence[tuple[Attack, str]],
     *,
@@ -1918,6 +1954,22 @@ async def _run_scan_body(
         surface_categories=surface_categories,
         repeats=repeats,
     )
+
+    # A re-claimed job resumes rather than restarting. Anything this scan
+    # already has an `attack_runs` row for is done — re-dispatching it pays
+    # for the same call twice and writes a second row the report then counts
+    # as a separate finding.
+    done_keys = await already_run_keys(db, scan_id)
+    if done_keys:
+        before = len(units)
+        units = [u for u in units if unit_key(u) not in done_keys]
+        log.info(
+            "scan.resumed",
+            scan_id=scan_id,
+            already_done=len(done_keys),
+            skipped=before - len(units),
+            remaining=len(units),
+        )
 
     pending_judged: list[_PendingJudged] = []
     pending_checks: list[_PendingCrossCheck] = []

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { estimateScan, getActiveScan, startScan, type ScanMode } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
-import { Arrow } from "../components/ui";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
 import { SCAN_MODES } from "../data";
@@ -110,11 +109,15 @@ export function ScanConfig() {
       />
 
       {runningScan != null && (
-        <div className="panel" data-state="running">
-          <p>This project already has a scan running.</p>
-          <Link className="btn" data-variant="ghost" to={`/e/${ex.slug}/scanning`}>
-            Back to the run <Arrow />
-          </Link>
+        <div className="warnband">
+          <span className="warnband__mark mono">running</span>
+          <div>
+            <p className="warnband__h">This project already has a scan going.</p>
+            <p className="warnband__b">
+              Starting another will run alongside it and spend against the same key.{" "}
+              <Link to={`/e/${ex.slug}/scanning`}>Back to the run</Link>.
+            </p>
+          </div>
         </div>
       )}
 

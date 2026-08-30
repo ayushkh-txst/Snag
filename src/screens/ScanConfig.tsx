@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { estimateScan, startScan, type ScanMode } from "../api/client";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { estimateScan, getActiveScan, startScan, type ScanMode } from "../api/client";
 import { NextBar, StepHead } from "../components/Shell";
+import { Arrow } from "../components/ui";
 import { ErrorState, Loading, NotFound } from "../components/States";
 import { useProject } from "../hooks/useProject";
 import { SCAN_MODES } from "../data";
@@ -19,6 +20,25 @@ export function ScanConfig() {
   const { slug } = useParams();
   const nav = useNavigate();
   const { data: ex, loading, error, notFound } = useProject(slug);
+  // Step 04 is where a run is started, so it is also where someone comes
+  // looking for one already going — the scanning screen is otherwise
+  // reachable only by the link that navigated there in the first place.
+  const [runningScan, setRunningScan] = useState<number | null>(null);
+  useEffect(() => {
+    if (!slug) return;
+    let cancelled = false;
+    getActiveScan(slug)
+      .then((a) => {
+        if (!cancelled) setRunningScan(a.scanId);
+      })
+      .catch(() => {
+        // an affordance, not the step — a failed lookup just hides it
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
   const [mode, setMode] = useState("standard");
   const [repeats, setRepeats] = useState(3);
   const [on, setOn] = useState<string[]>(["direct", "tool"]);
@@ -88,6 +108,15 @@ export function ScanConfig() {
         title="Decide what this is going to cost."
         lede="Models are random, so every attack runs more than once and you get a rate rather than a yes or no. Both caps stop the scan before a call is sent, not after."
       />
+
+      {runningScan != null && (
+        <div className="panel" data-state="running">
+          <p>This project already has a scan running.</p>
+          <Link className="btn" data-variant="ghost" to={`/e/${ex.slug}/scanning`}>
+            Back to the run <Arrow />
+          </Link>
+        </div>
+      )}
 
       <section className="modes">
         {SCAN_MODES.map((m) => (

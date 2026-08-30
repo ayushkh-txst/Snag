@@ -928,6 +928,47 @@ def unit_key(unit: Any) -> UnitKey:
     )
 
 
+async def _select_rule_tiers_conn(conn: Any, project_id: str) -> tuple[list[Any], list[Any]]:
+    """Split a project's rules into the mechanical tier and the judged tier.
+
+    The split follows the CHECKER, not the `testable` flag. It used to follow
+    the flag, on the stated assumption that the tiers were disjoint by
+    construction because a rule is inserted with `testable = (checker_type !=
+    'none')`. The rules screen lets a person toggle `testable`, so that
+    construction does not survive contact with the UI: ticking a rule that
+    has no mechanical checker moved it into the mechanical tier, where the
+    only checker available is the `none` no-op. Live, two ticked rules took
+    fifty attacks between them and every one came back "not testable by code
+    — needs human review" — fifty paid calls that scored nothing, on the two
+    rules the judge exists to cover.
+
+    Ticking a rule means "test this". Having no checker means code cannot, so
+    the judge is the only tier that can say anything about it. Unticking a
+    rule that HAS a checker still drops it from both tiers, which is what
+    unticking is for."""
+    mechanical = await conn.fetch(
+        """SELECT * FROM rules
+               WHERE project_id = $1 AND testable
+                 AND checker_type IS NOT NULL AND checker_type <> 'none'
+               ORDER BY id""",
+        project_id,
+    )
+    judged = await conn.fetch(
+        """SELECT * FROM rules
+               WHERE project_id = $1
+                 AND (checker_type IS NULL OR checker_type = 'none')
+               ORDER BY id""",
+        project_id,
+    )
+    return list(mechanical), list(judged)
+
+
+async def select_rule_tiers(db: Database, project_id: str) -> tuple[list[Any], list[Any]]:
+    """`_select_rule_tiers_conn` against a pool rather than a held connection."""
+    async with db.acquire() as conn:
+        return await _select_rule_tiers_conn(conn, project_id)
+
+
 async def already_run_keys(db: Database, scan_id: int) -> set[UnitKey]:
     """The attacks this scan has already recorded a run for.
 
@@ -1738,24 +1779,7 @@ async def _run_scan(
             prompt_version = await conn.fetchrow(
                 "SELECT * FROM prompt_versions WHERE id = $1", scan["prompt_version_id"]
             )
-        rule_rows = await conn.fetch(
-            "SELECT * FROM rules WHERE project_id = $1 AND testable ORDER BY id",
-            scan["project_id"],
-        )
-        # TIER 2: the rules no checker in the registry could express. Disjoint
-        # from `rule_rows` above by construction — a rule is inserted with
-        # `testable = (checker_type != 'none')` — so nothing is attacked
-        # twice and no rule with a mechanical checker ever reaches the judge.
-        # The `NOT testable` half also means a rule the user explicitly
-        # unticked stays untested by BOTH tiers, which is what unticking a
-        # rule is for.
-        judged_rule_rows = await conn.fetch(
-            """SELECT * FROM rules
-               WHERE project_id = $1 AND NOT testable
-                 AND (checker_type IS NULL OR checker_type = 'none')
-               ORDER BY id""",
-            scan["project_id"],
-        )
+        rule_rows, judged_rule_rows = await _select_rule_tiers_conn(conn, scan["project_id"])
         surface_rows = await conn.fetch(
             """SELECT * FROM surfaces WHERE project_id = $1 AND confirmed AND user_controlled
                ORDER BY id""",

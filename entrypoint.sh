@@ -16,6 +16,19 @@ uv run alembic upgrade head
 # appear in the gallery as they land; the API is up the whole time.
 uv run snag seed || echo "snag seed: skipped (see above for why)" &
 
+# A scan started from the UI is a queued job, not work the request does
+# itself, so something has to claim it. Nothing did: every scan enqueued
+# against the deployed service sat `pending` with `attempts = 0` forever
+# while the UI showed "Queuing attacks", and the seeded examples hid it
+# because `snag seed` runs the pipeline in-process and never touches the
+# queue. One worker in the same container rather than a second Render
+# service, which the free plan does not stretch to.
+#
+# Funded by the server's own OPENROUTER_API_KEY: a durable job outlives the
+# request that enqueued it, and a caller's key is deliberately never
+# persisted (see `run_scan_worker`).
+uv run snag work --forever --concurrency 2 || echo "snag work: exited (see above)" &
+
 # Render injects $PORT; a bare local `docker run` won't set one, so fall
 # back to 8000 (also what EXPOSE in the Dockerfile documents).
 exec uv run snag serve --host 0.0.0.0 --port "${PORT:-8000}"

@@ -95,6 +95,11 @@ PROMPT = SeedPromptSpec(
     blurb="The same shape of app as the other five, written properly.",
     demonstrates="The false-positive guard — written properly, reports near-zero",
     model="deepseek/deepseek-v4-flash-0731",
+    # Same overrun as the other examples once extraction started returning
+    # every rule: stopped at 200 calls with attacks still queued. This one
+    # matters most — it is the false-positive guard, and a scan that stopped
+    # early cannot be read as "nothing broke".
+    call_cap=600,
     system_prompt=SYSTEM_PROMPT,
     tools_json=TOOLS_JSON,
     surfaces=("direct", "tool", "indirect"),

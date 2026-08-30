@@ -68,3 +68,7 @@ CONVENTIONS.md
 .gsd/
 notes/
 scratch/
+
+# walkthrough scripts — reference material for recording, not part of the
+# repo a reader clones
+docs/

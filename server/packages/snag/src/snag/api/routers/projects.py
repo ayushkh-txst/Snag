@@ -227,11 +227,12 @@ async def create_project(
                 tools_obj,
             )
         for rule in extraction.rules:
-            await conn.execute(
+            rule_id = await conn.fetchval(
                 """INSERT INTO rules
                        (project_id, text, category, direction, source_line,
                         checker_type, checker_config, testable, confidence)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING id""",
                 slug,
                 rule.text,
                 rule.category,
@@ -242,6 +243,19 @@ async def create_project(
                 rule.checker_type != "none",
                 rule.confidence,
             )
+            # Extraction's own "I could not fill this blank in" list is what
+            # the Questions step exists to ask. Persisting the rule without
+            # it left that screen empty for every project created here, while
+            # the seeded examples looked fine because `snag.seed` writes the
+            # same rows down its own path.
+            for question_text in rule.open_questions:
+                await conn.execute(
+                    """INSERT INTO questions (rule_id, project_id, round, text, status)
+                       VALUES ($1, $2, 1, $3, 'open')""",
+                    rule_id,
+                    slug,
+                    question_text,
+                )
         # The chat surface always exists — every pasted prompt reaches the
         # model through a user message. Detecting template-var / tool-param /
         # tool-return surfaces from `tools_obj` is 01-01's follow-on

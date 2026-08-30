@@ -61,6 +61,12 @@ PROMPT = SeedPromptSpec(
         "becomes an instruction · bypass token read aloud"
     ),
     model="deepseek/deepseek-v4-flash-0731",
+    # Extraction now yields both halves of each self-undercutting rule, and
+    # 11 rules x the technique library over two surfaces overran the 200
+    # default: the scan stopped with attacks never dispatched, which reads on
+    # the report as coverage it never had. Spend is nowhere near its own cap
+    # ($0.009 of $2.00) — calls are the binding constraint here.
+    call_cap=600,
     system_prompt=SYSTEM_PROMPT,
     tools_json=TOOLS_JSON,
     surfaces=("direct", "indirect"),

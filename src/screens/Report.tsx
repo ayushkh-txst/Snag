@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { getActiveScan } from "../api/client";
 import { StepHead } from "../components/Shell";
 import { SnagMark } from "../components/SnagMark";
 import { ErrorState, Loading, NotFound } from "../components/States";
@@ -182,6 +183,45 @@ function BrokenRule({ ex, rule, i }: { ex: Example; rule: Rule; i: number }) {
   );
 }
 
+/** A report is readable while its scan is still running — the rows are real
+ *  as far as they go. What was missing was any sign that more is coming, and
+ *  any way back to the run: leaving the scanning screen stranded it, because
+ *  nothing else on the site mentions a scan in flight. */
+function LiveScanBanner({ slug }: { slug: string }) {
+  const [active, setActive] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = () =>
+      getActiveScan(slug)
+        .then((a) => {
+          if (!cancelled) setActive(a.scanId);
+        })
+        .catch(() => {
+          // the banner is an affordance, not the report — stay quiet
+        });
+    check();
+    const timer = window.setInterval(check, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [slug]);
+
+  if (active == null) return null;
+  return (
+    <div className="panel" data-state="running">
+      <p>
+        A scan is still running for this project — these findings are partial and
+        will keep growing.
+      </p>
+      <Link className="btn" data-variant="ghost" to={`/e/${slug}/scanning`}>
+        Watch it run <Arrow />
+      </Link>
+    </div>
+  );
+}
+
 export function Report() {
   const { slug } = useParams();
   const { data: ex, loading, error, notFound } = useProject(slug);
@@ -191,7 +231,12 @@ export function Report() {
   if (error) return <ErrorState error={error} />;
   if (!ex) return <Loading label="Loading report…" />;
 
-  return <ReportBody ex={ex} />;
+  return (
+    <>
+      <LiveScanBanner slug={ex.slug} />
+      <ReportBody ex={ex} />
+    </>
+  );
 }
 
 function ReportBody({ ex }: { ex: Example }) {

@@ -179,6 +179,41 @@ async def create_scan(
     return StartScanResponse(scan_id=scan_id)
 
 
+class ActiveScanResponse(BaseModel):
+    """The scan a project currently has in flight, if any. `scanId` is null
+    when nothing is running."""
+
+    scanId: int | None = None
+    status: str | None = None
+
+
+@router.get("/projects/{slug}/active-scan", response_model=ActiveScanResponse)
+async def get_active_scan(slug: str, request: Request) -> ActiveScanResponse:
+    """Which scan, if any, this project has in flight.
+
+    Resuming a run used to depend on a localStorage key written by the config
+    screen, so a typed URL, a second tab, or another device had nothing to
+    reconnect to and the scanning screen reported a finished run while the
+    worker was still going. The project row is the durable answer, and it is
+    the same one for every client.
+
+    `pending` counts as active on purpose: a queued job not yet claimed is
+    exactly the window the UI spends saying "queuing attacks", and it is the
+    one most in need of being resumable."""
+    await require_slug(request, slug)
+    state = ctx(request)
+    async with state.db.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, status FROM scans
+                   WHERE project_id = $1 AND status NOT IN ('completed', 'stopped_at_cap', 'failed')
+                   ORDER BY id DESC LIMIT 1""",
+            slug,
+        )
+    if row is None:
+        return ActiveScanResponse()
+    return ActiveScanResponse(scanId=row["id"], status=row["status"])
+
+
 @router.get("/scans/{scan_id}", response_model=ScanRecordResponse)
 async def get_scan(scan_id: int, request: Request) -> ScanRecordResponse:
     state = ctx(request)
